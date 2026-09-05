@@ -16,11 +16,12 @@ from .const import (
     CONF_BIND_IP,
     CONF_BRIGHTNESS,
     CONF_CHANNEL_MODE,
-    CONF_ENTITY_ID,
+    CONF_ENTITY_IDS,
     CONF_HA_UPDATE_HZ,
     CONF_INBOUND_MAPS,
     CONF_MAP_ID,
     CONF_MAP_NAME,
+    CONF_NEXT_STEP,
     CONF_OUTBOUND_MAPS,
     CONF_PRIORITY,
     CONF_RECEIVE_ENABLED,
@@ -46,7 +47,9 @@ from .const import (
 )
 from .models import (
     InboundMap,
+    NoChannelCapacityError,
     OutboundMap,
+    assign_inbound_maps,
     mapping_label,
     parse_inbound_maps,
     parse_outbound_maps,
@@ -56,6 +59,19 @@ from .receiver import local_ipv4_addresses
 _MODE_OPTIONS = [
     selector.SelectOptionDict(value=mode.value, label=CHANNEL_MODE_LABELS[mode])
     for mode in ChannelMode
+]
+
+_NEXT_OPTIONS = [
+    selector.SelectOptionDict(
+        value="inbound",
+        label="Select Home Assistant lights to control from sACN",
+    ),
+    selector.SelectOptionDict(
+        value="outbound",
+        label="Add an sACN fixture light (Home Assistant → sACN)",
+    ),
+    selector.SelectOptionDict(value="remove", label="Remove a mapping"),
+    selector.SelectOptionDict(value="settings", label="Network and rate settings"),
 ]
 
 
@@ -125,6 +141,55 @@ def _settings_schema(data: dict[str, Any]) -> vol.Schema:
     )
 
 
+def _inbound_schema(selected: list[str]) -> vol.Schema:
+    return vol.Schema(
+        {
+            vol.Optional(CONF_ENTITY_IDS, default=selected): selector.EntitySelector(
+                selector.EntitySelectorConfig(domain="light", multiple=True)
+            ),
+            vol.Required(CONF_UNIVERSE, default=1): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=UNIVERSE_MIN, max=UNIVERSE_MAX, mode=selector.NumberSelectorMode.BOX
+                )
+            ),
+            vol.Required(CONF_START_CHANNEL, default=1): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=CHANNEL_MIN, max=CHANNEL_MAX, mode=selector.NumberSelectorMode.BOX
+                )
+            ),
+            vol.Required(
+                CONF_CHANNEL_MODE, default=ChannelMode.RGB_8.value
+            ): selector.SelectSelector(selector.SelectSelectorConfig(options=_MODE_OPTIONS)),
+            vol.Optional(CONF_BRIGHTNESS, default=1.0): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=0, max=1, step=0.05, mode=selector.NumberSelectorMode.SLIDER
+                )
+            ),
+        }
+    )
+
+
+def _outbound_schema() -> vol.Schema:
+    return vol.Schema(
+        {
+            vol.Required(CONF_MAP_NAME): selector.TextSelector(),
+            vol.Required(CONF_UNIVERSE, default=1): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=UNIVERSE_MIN, max=UNIVERSE_MAX, mode=selector.NumberSelectorMode.BOX
+                )
+            ),
+            vol.Required(CONF_START_CHANNEL, default=1): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=CHANNEL_MIN, max=CHANNEL_MAX, mode=selector.NumberSelectorMode.BOX
+                )
+            ),
+            vol.Required(
+                CONF_CHANNEL_MODE, default=ChannelMode.RGB_8.value
+            ): selector.SelectSelector(selector.SelectSelectorConfig(options=_MODE_OPTIONS)),
+        }
+    )
+
+
 def _normalize_settings(user_input: dict[str, Any]) -> dict[str, Any]:
     source = str(user_input.get(CONF_SOURCE_NAME) or DEFAULT_SOURCE_NAME).strip()
     return {
@@ -139,36 +204,116 @@ def _normalize_settings(user_input: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _entity_ids(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [str(item) for item in value if item]
+    return []
+
+
+def _save_inbound(
+    user_input: dict[str, Any], existing: list[InboundMap]
+) -> list[InboundMap]:
+    return assign_inbound_maps(
+        _entity_ids(user_input.get(CONF_ENTITY_IDS)),
+        existing,
+        universe=int(user_input.get(CONF_UNIVERSE, 1)),
+        start_channel=int(user_input.get(CONF_START_CHANNEL, 1)),
+        channel_mode=user_input.get(CONF_CHANNEL_MODE, ChannelMode.RGB_8),
+        brightness=float(user_input.get(CONF_BRIGHTNESS, 1.0)),
+    )
+
+
 class SacnControlConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Initial setup flow."""
+    """Initial setup: network settings, then pick lights and fixtures."""
 
     VERSION = 1
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Collect network settings and create the single config entry."""
+        """Collect network settings, then continue to light mapping."""
         await self.async_set_unique_id(DOMAIN)
         self._abort_if_unique_id_configured()
         if user_input is not None:
-            return self.async_create_entry(title=DEFAULT_NAME, data=_normalize_settings(user_input))
+            self._settings = _normalize_settings(user_input)
+            self._inbound = []
+            self._outbound = []
+            return await self.async_step_inbound()
         return self.async_show_form(step_id="user", data_schema=_settings_schema({}))
+
+    async def async_step_inbound(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Select which existing Home Assistant lights sACN should drive."""
+        if user_input is not None:
+            try:
+                self._inbound = _save_inbound(user_input, getattr(self, "_inbound", []))
+            except NoChannelCapacityError:
+                return self.async_show_form(
+                    step_id="inbound",
+                    data_schema=_inbound_schema(_entity_ids(user_input.get(CONF_ENTITY_IDS))),
+                    errors={CONF_START_CHANNEL: "no_channel_capacity"},
+                )
+            return await self.async_step_outbound()
+        return self.async_show_form(step_id="inbound", data_schema=_inbound_schema([]))
+
+    async def async_step_outbound(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Optionally create a Home Assistant light that transmits sACN."""
+        if user_input is not None:
+            name = str(user_input.get(CONF_MAP_NAME) or "").strip()
+            if name:
+                self._outbound.append(OutboundMap.from_dict(user_input))
+            return self.async_create_entry(
+                title=DEFAULT_NAME,
+                data=self._settings,
+                options={
+                    CONF_INBOUND_MAPS: [item.to_dict() for item in self._inbound],
+                    CONF_OUTBOUND_MAPS: [item.to_dict() for item in self._outbound],
+                },
+            )
+        return self.async_show_form(step_id="outbound", data_schema=_optional_outbound_schema())
 
     @staticmethod
     @callback
-    def async_get_options_flow(config_entry: ConfigEntry) -> SacnControlOptionsFlow:
-        """Return the options flow."""
-        return SacnControlOptionsFlow(config_entry)
+    def async_get_options_flow(
+        _config_entry: ConfigEntry | None = None,
+    ) -> SacnControlOptionsFlow:
+        """Return the options flow. HA injects config_entry on the handler."""
+        return SacnControlOptionsFlow()
+
+
+def _optional_outbound_schema() -> vol.Schema:
+    return vol.Schema(
+        {
+            vol.Optional(CONF_MAP_NAME, default=""): selector.TextSelector(),
+            vol.Optional(CONF_UNIVERSE, default=1): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=UNIVERSE_MIN, max=UNIVERSE_MAX, mode=selector.NumberSelectorMode.BOX
+                )
+            ),
+            vol.Optional(CONF_START_CHANNEL, default=1): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=CHANNEL_MIN, max=CHANNEL_MAX, mode=selector.NumberSelectorMode.BOX
+                )
+            ),
+            vol.Optional(
+                CONF_CHANNEL_MODE, default=ChannelMode.RGB_8.value
+            ): selector.SelectSelector(selector.SelectSelectorConfig(options=_MODE_OPTIONS)),
+        }
+    )
 
 
 class SacnControlOptionsFlow(OptionsFlow):
     """Add, remove, and retune mappings after setup."""
 
-    def __init__(self, config_entry: ConfigEntry) -> None:
-        self._config_entry = config_entry
-
     def _options(self) -> dict[str, Any]:
-        return dict(self._config_entry.options)
+        return dict(self.config_entry.options)
 
     def _inbound(self) -> list[InboundMap]:
         return parse_inbound_maps(self._options().get(CONF_INBOUND_MAPS))
@@ -176,57 +321,68 @@ class SacnControlOptionsFlow(OptionsFlow):
     def _outbound(self) -> list[OutboundMap]:
         return parse_outbound_maps(self._options().get(CONF_OUTBOUND_MAPS))
 
-    async def async_step_init(
-        self, _user_input: dict[str, Any] | None = None
+    def _write(
+        self,
+        inbound: list[InboundMap] | None = None,
+        outbound: list[OutboundMap] | None = None,
     ) -> ConfigFlowResult:
-        """Show the options menu."""
-        return self.async_show_menu(
-            step_id="init",
-            menu_options=["add_inbound", "add_outbound", "remove_map", "settings"],
-        )
+        options = self._options()
+        if inbound is not None:
+            options[CONF_INBOUND_MAPS] = [item.to_dict() for item in inbound]
+        if outbound is not None:
+            options[CONF_OUTBOUND_MAPS] = [item.to_dict() for item in outbound]
+        return self.async_create_entry(title="", data=options)
 
-    async def async_step_add_inbound(
+    async def async_step_init(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
-        """Patch an existing Home Assistant light to an sACN address."""
+        """Choose what to configure. Form-based so it works without menu support."""
         if user_input is not None:
-            mapping = InboundMap.from_dict(user_input)
-            inbound = [item for item in self._inbound() if item.map_id != mapping.map_id]
-            inbound.append(mapping)
-            options = self._options()
-            options[CONF_INBOUND_MAPS] = [item.to_dict() for item in inbound]
-            return self.async_create_entry(title="", data=options)
+            next_step = user_input.get(CONF_NEXT_STEP, "inbound")
+            if next_step == "outbound":
+                return await self.async_step_outbound()
+            if next_step == "remove":
+                return await self.async_step_remove()
+            if next_step == "settings":
+                return await self.async_step_settings()
+            return await self.async_step_inbound()
+        inbound = self._inbound()
+        outbound = self._outbound()
+        description = (
+            f"{len(inbound)} Home Assistant light(s) receive sACN. "
+            f"{len(outbound)} sACN fixture(s) are exposed as lights."
+        )
         schema = vol.Schema(
             {
-                vol.Required(CONF_ENTITY_ID): selector.EntitySelector(
-                    selector.EntitySelectorConfig(domain="light")
-                ),
-                vol.Optional(CONF_MAP_NAME): selector.TextSelector(),
-                vol.Required(CONF_UNIVERSE, default=1): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=UNIVERSE_MIN, max=UNIVERSE_MAX, mode=selector.NumberSelectorMode.BOX
-                    )
-                ),
-                vol.Required(CONF_START_CHANNEL, default=1): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=CHANNEL_MIN, max=CHANNEL_MAX, mode=selector.NumberSelectorMode.BOX
-                    )
-                ),
-                vol.Required(
-                    CONF_CHANNEL_MODE, default=ChannelMode.RGB_8.value
-                ): selector.SelectSelector(
-                    selector.SelectSelectorConfig(options=_MODE_OPTIONS)
-                ),
-                vol.Optional(CONF_BRIGHTNESS, default=1.0): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=0, max=1, step=0.05, mode=selector.NumberSelectorMode.SLIDER
-                    )
-                ),
+                vol.Required(CONF_NEXT_STEP, default="inbound"): selector.SelectSelector(
+                    selector.SelectSelectorConfig(options=_NEXT_OPTIONS)
+                )
             }
         )
-        return self.async_show_form(step_id="add_inbound", data_schema=schema)
+        return self.async_show_form(
+            step_id="init",
+            data_schema=schema,
+            description_placeholders={"summary": description},
+        )
 
-    async def async_step_add_outbound(
+    async def async_step_inbound(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Select which existing Home Assistant lights sACN should drive."""
+        selected = [item.entity_id for item in self._inbound()]
+        if user_input is not None:
+            try:
+                inbound = _save_inbound(user_input, self._inbound())
+            except NoChannelCapacityError:
+                return self.async_show_form(
+                    step_id="inbound",
+                    data_schema=_inbound_schema(_entity_ids(user_input.get(CONF_ENTITY_IDS))),
+                    errors={CONF_START_CHANNEL: "no_channel_capacity"},
+                )
+            return self._write(inbound=inbound)
+        return self.async_show_form(step_id="inbound", data_schema=_inbound_schema(selected))
+
+    async def async_step_outbound(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Create a Home Assistant light that transmits sACN."""
@@ -234,55 +390,27 @@ class SacnControlOptionsFlow(OptionsFlow):
             mapping = OutboundMap.from_dict(user_input)
             outbound = [item for item in self._outbound() if item.map_id != mapping.map_id]
             outbound.append(mapping)
-            options = self._options()
-            options[CONF_OUTBOUND_MAPS] = [item.to_dict() for item in outbound]
-            return self.async_create_entry(title="", data=options)
-        schema = vol.Schema(
-            {
-                vol.Required(CONF_MAP_NAME): selector.TextSelector(),
-                vol.Required(CONF_UNIVERSE, default=1): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=UNIVERSE_MIN, max=UNIVERSE_MAX, mode=selector.NumberSelectorMode.BOX
-                    )
-                ),
-                vol.Required(CONF_START_CHANNEL, default=1): selector.NumberSelector(
-                    selector.NumberSelectorConfig(
-                        min=CHANNEL_MIN, max=CHANNEL_MAX, mode=selector.NumberSelectorMode.BOX
-                    )
-                ),
-                vol.Required(
-                    CONF_CHANNEL_MODE, default=ChannelMode.RGB_8.value
-                ): selector.SelectSelector(
-                    selector.SelectSelectorConfig(options=_MODE_OPTIONS)
-                ),
-            }
-        )
-        return self.async_show_form(step_id="add_outbound", data_schema=schema)
+            return self._write(outbound=outbound)
+        return self.async_show_form(step_id="outbound", data_schema=_outbound_schema())
 
-    async def async_step_remove_map(
+    async def async_step_remove(
         self, user_input: dict[str, Any] | None = None
     ) -> ConfigFlowResult:
         """Remove an inbound or outbound mapping."""
         inbound = self._inbound()
         outbound = self._outbound()
-        choices = {
-            item.map_id: f"Inbound · {mapping_label(item)}" for item in inbound
-        }
+        choices = {item.map_id: f"sACN → HA · {mapping_label(item)}" for item in inbound}
         choices.update(
-            {item.map_id: f"Outbound · {mapping_label(item)}" for item in outbound}
+            {item.map_id: f"HA → sACN · {mapping_label(item)}" for item in outbound}
         )
         if not choices:
             return self.async_abort(reason="no_maps")
         if user_input is not None:
             map_id = user_input[CONF_MAP_ID]
-            options = self._options()
-            options[CONF_INBOUND_MAPS] = [
-                item.to_dict() for item in inbound if item.map_id != map_id
-            ]
-            options[CONF_OUTBOUND_MAPS] = [
-                item.to_dict() for item in outbound if item.map_id != map_id
-            ]
-            return self.async_create_entry(title="", data=options)
+            return self._write(
+                inbound=[item for item in inbound if item.map_id != map_id],
+                outbound=[item for item in outbound if item.map_id != map_id],
+            )
         schema = vol.Schema(
             {
                 vol.Required(CONF_MAP_ID): selector.SelectSelector(
@@ -295,7 +423,7 @@ class SacnControlOptionsFlow(OptionsFlow):
                 )
             }
         )
-        return self.async_show_form(step_id="remove_map", data_schema=schema)
+        return self.async_show_form(step_id="remove", data_schema=schema)
 
     async def async_step_settings(
         self, user_input: dict[str, Any] | None = None
@@ -303,9 +431,9 @@ class SacnControlOptionsFlow(OptionsFlow):
         """Update network and rate settings stored on the config entry."""
         if user_input is not None:
             self.hass.config_entries.async_update_entry(
-                self._config_entry, data=_normalize_settings(user_input)
+                self.config_entry, data=_normalize_settings(user_input)
             )
             return self.async_create_entry(title="", data=self._options())
         return self.async_show_form(
-            step_id="settings", data_schema=_settings_schema(dict(self._config_entry.data))
+            step_id="settings", data_schema=_settings_schema(dict(self.config_entry.data))
         )

@@ -1,6 +1,6 @@
 [project]
 name = "ha-sacn-control"
-version = "0.1.0"
+version = "0.1.1"
 description = "Home Assistant HACS integration for bidirectional sACN (E1.31) lighting control"
 readme = "README.md"
 requires-python = ">=3.12"

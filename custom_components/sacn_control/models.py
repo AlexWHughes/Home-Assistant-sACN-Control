@@ -172,3 +172,86 @@ def mapping_label(mapping: InboundMap | OutboundMap) -> str:
     mode = mapping.channel_mode.value
     span = f"U{mapping.universe} Ch {mapping.start_channel}–{mapping.end_channel}"
     return f"{mapping.name} ({span}, {mode})"
+
+
+def _channel_overlaps(left: InboundMap, universe: int, start: int, span: int) -> bool:
+    if left.universe != universe:
+        return False
+    end = start + span - 1
+    return not (left.end_channel < start or left.start_channel > end)
+
+
+class NoChannelCapacityError(ValueError):
+    """No contiguous DMX span remains on the requested universe."""
+
+
+def next_free_channel(
+    existing: list[InboundMap],
+    universe: int,
+    start_channel: int,
+    span: int,
+) -> int | None:
+    """Return a free start channel, or None if no contiguous span remains."""
+    channel = max(CHANNEL_MIN, min(CHANNEL_MAX, start_channel))
+    span = max(1, span)
+    while channel + span - 1 <= CHANNEL_MAX:
+        if not any(_channel_overlaps(item, universe, channel, span) for item in existing):
+            return channel
+        channel += 1
+    return None
+
+
+def assign_inbound_maps(
+    entity_ids: list[str],
+    existing: list[InboundMap],
+    *,
+    universe: int,
+    start_channel: int,
+    channel_mode: ChannelMode | str,
+    brightness: float = 1.0,
+) -> list[InboundMap]:
+    """Keep patches for still-selected lights; address newly selected lights sequentially."""
+    selected = [
+        entity_id.strip()
+        for entity_id in entity_ids
+        if isinstance(entity_id, str) and entity_id.strip().startswith("light.")
+    ]
+    seen: set[str] = set()
+    ordered: list[str] = []
+    for entity_id in selected:
+        if entity_id in seen:
+            continue
+        seen.add(entity_id)
+        ordered.append(entity_id)
+
+    keep = {item.entity_id: item for item in existing if item.entity_id in seen}
+    maps: list[InboundMap] = []
+    for entity_id in ordered:
+        if entity_id in keep:
+            maps.append(keep[entity_id])
+
+    mode = normalize_channel_mode(channel_mode)
+    span = channels_for_mode(mode)
+    next_channel = start_channel
+    for entity_id in ordered:
+        if entity_id in keep:
+            continue
+        next_channel = next_free_channel(maps, universe, next_channel, span)
+        if next_channel is None:
+            raise NoChannelCapacityError(
+                f"No free {span}-channel span remains on universe {universe}"
+            )
+        maps.append(
+            InboundMap.from_dict(
+                {
+                    CONF_ENTITY_ID: entity_id,
+                    CONF_UNIVERSE: universe,
+                    CONF_START_CHANNEL: next_channel,
+                    CONF_CHANNEL_MODE: mode,
+                    CONF_BRIGHTNESS: brightness,
+                    CONF_MAP_NAME: entity_id,
+                }
+            )
+        )
+        next_channel += span
+    return maps
