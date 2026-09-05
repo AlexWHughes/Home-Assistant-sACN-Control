@@ -238,10 +238,13 @@ def test_mapping_removal_value_prefers_persisted_map_id() -> None:
             "channel_mode": "rgb_8",
         }
     )
-    assert mapping_removal_value(mapping) == "fixture-1"
-    removed = remove_mapping_by_token("fixture-1", [], [mapping])
+    assert mapping_removal_value(mapping) == "out|fixture-1"
+    removed = remove_mapping_by_token(mapping_removal_value(mapping), [], [mapping])
     assert removed is not None
     assert removed[1] == []
+    by_bare = remove_mapping_by_token("fixture-1", [], [mapping])
+    assert by_bare is not None
+    assert by_bare[1] == []
     legacy = OutboundMap(
         map_id="",
         name="Legacy",
@@ -265,3 +268,41 @@ def test_persist_outbound_map_ids_migrates_missing_ids() -> None:
     assert migrated[0]["map_id"] == maps[0].map_id
     assert persist_outbound_map_ids(migrated, parse_outbound_maps(migrated)) is None
     assert persist_outbound_map_ids(raw, []) is None
+
+
+def test_remove_colliding_inbound_and_outbound_ids_stays_directional() -> None:
+    inbound = InboundMap.from_dict(
+        {
+            "map_id": "shared",
+            "entity_id": "light.kitchen",
+            "universe": 1,
+            "start_channel": 1,
+            "channel_mode": "rgb_8",
+        }
+    )
+    outbound = OutboundMap.from_dict(
+        {
+            "map_id": "shared",
+            "name": "Stage Wash",
+            "universe": 2,
+            "start_channel": 5,
+            "channel_mode": "rgb_8",
+        }
+    )
+    by_out = remove_mapping_by_token(
+        mapping_removal_value(outbound), [inbound], [outbound]
+    )
+    assert by_out is not None
+    assert by_out[0] == [inbound]
+    assert by_out[1] == []
+    by_in = remove_mapping_by_token(
+        mapping_removal_value(inbound), [inbound], [outbound]
+    )
+    assert by_in is not None
+    assert by_in[0] == []
+    assert by_in[1] == [outbound]
+    assert remove_mapping_by_token("shared", [inbound], [outbound]) is None
+    namespaced_in = remove_mapping_by_token("in|shared", [inbound], [outbound])
+    assert namespaced_in is not None
+    assert namespaced_in[0] == []
+    assert namespaced_in[1] == [outbound]

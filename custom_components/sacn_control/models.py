@@ -195,21 +195,25 @@ def mapping_label(mapping: InboundMap | OutboundMap) -> str:
     return f"{mapping.name} ({span}, {mode})"
 
 
+_IN_PREFIX = "in|"
+_OUT_PREFIX = "out|"
+
+
 def mapping_token(mapping: InboundMap | OutboundMap) -> str:
     """Legacy remove-form value that does not depend on a regenerated map_id."""
     if isinstance(mapping, InboundMap):
-        return f"in|{mapping.entity_id}"
+        return f"{_IN_PREFIX}{mapping.entity_id}"
     return (
-        f"out|{mapping.universe}|{mapping.start_channel}|"
+        f"{_OUT_PREFIX}{mapping.universe}|{mapping.start_channel}|"
         f"{mapping.channel_mode.value}|{mapping.pixel_count}|"
         f"{mapping.pixel_layout.value}|{mapping.name}"
     )
 
 
 def mapping_removal_value(mapping: InboundMap | OutboundMap) -> str:
-    """Select value: persisted outbound map_id, otherwise the legacy token."""
+    """Select value: direction-namespaced map_id, otherwise the legacy token."""
     if isinstance(mapping, OutboundMap) and mapping.map_id:
-        return mapping.map_id
+        return f"{_OUT_PREFIX}{mapping.map_id}"
     return mapping_token(mapping)
 
 
@@ -238,23 +242,42 @@ def remove_mapping_by_token(
         return None
 
     inbound_kept = [item for item in inbound if mapping_token(item) != raw]
+    if len(inbound_kept) < len(inbound):
+        return inbound_kept, outbound
     outbound_kept = [item for item in outbound if mapping_token(item) != raw]
-    if len(inbound_kept) < len(inbound) or len(outbound_kept) < len(outbound):
-        return inbound_kept, outbound_kept
+    if len(outbound_kept) < len(outbound):
+        return inbound, outbound_kept
 
-    inbound_kept = [item for item in inbound if item.map_id != raw]
-    outbound_kept = [item for item in outbound if item.map_id != raw]
-    if len(inbound_kept) < len(inbound) or len(outbound_kept) < len(outbound):
-        return inbound_kept, outbound_kept
+    if raw.startswith(_OUT_PREFIX):
+        map_id = raw[len(_OUT_PREFIX) :]
+        outbound_kept = [item for item in outbound if item.map_id != map_id]
+        if len(outbound_kept) < len(outbound):
+            return inbound, outbound_kept
+    elif raw.startswith(_IN_PREFIX):
+        map_id = raw[len(_IN_PREFIX) :]
+        inbound_kept = [item for item in inbound if item.map_id != map_id]
+        if len(inbound_kept) < len(inbound):
+            return inbound_kept, outbound
+
+    inbound_hits = any(item.map_id == raw for item in inbound)
+    outbound_hits = any(item.map_id == raw for item in outbound)
+    if inbound_hits and outbound_hits:
+        return None
+    if inbound_hits:
+        return [item for item in inbound if item.map_id != raw], outbound
+    if outbound_hits:
+        return inbound, [item for item in outbound if item.map_id != raw]
 
     inbound_kept = [item for item in inbound if item.entity_id != raw]
     if len(inbound_kept) < len(inbound):
         return inbound_kept, outbound
 
     inbound_kept = [item for item in inbound if mapping_label(item) != raw]
+    if len(inbound_kept) < len(inbound):
+        return inbound_kept, outbound
     outbound_kept = [item for item in outbound if mapping_label(item) != raw]
-    if len(inbound_kept) < len(inbound) or len(outbound_kept) < len(outbound):
-        return inbound_kept, outbound_kept
+    if len(outbound_kept) < len(outbound):
+        return inbound, outbound_kept
 
     prefixed_in = "sACN → HA · "
     prefixed_out = "HA → sACN · "
