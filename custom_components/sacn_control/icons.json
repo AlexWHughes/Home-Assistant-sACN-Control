@@ -1,0 +1,23 @@
+{
+  "entity": {
+    "sensor": {
+      "packets_received": {
+        "default": "mdi:package-down"
+      },
+      "active_universes": {
+        "default": "mdi:satellite-uplink"
+      },
+      "receiving": {
+        "default": "mdi:broadcast"
+      }
+    },
+    "switch": {
+      "receive": {
+        "default": "mdi:broadcast"
+      },
+      "send": {
+        "default": "mdi:upload-network"
+      }
+    }
+  }
+}

@@ -1,0 +1,174 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "sACN Control",
+        "description": "Receive sACN to drive Home Assistant lights, and/or expose sACN fixtures as lights.",
+        "data": {
+          "source_name": "sACN source name",
+          "priority": "sACN priority (0-200)",
+          "bind_ip": "Network interface",
+          "receive_enabled": "Receive sACN (console → Home Assistant lights)",
+          "send_enabled": "Send sACN (Home Assistant → fixtures)",
+          "ha_update_hz": "Inbound update rate (Hz)",
+          "transition": "Inbound light transition (seconds)",
+          "white_blend": "RGBW white blend coefficient"
+        }
+      }
+    },
+    "abort": {
+      "already_configured": "sACN Control is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "sACN Control",
+        "description": "Patch lights to DMX or create sACN fixtures.",
+        "menu_options": {
+          "add_inbound": "Map sACN → Home Assistant light",
+          "add_outbound": "Add sACN fixture (Home Assistant → sACN)",
+          "remove_map": "Remove a mapping",
+          "settings": "Network and rate settings"
+        }
+      },
+      "add_inbound": {
+        "title": "Map sACN to a light",
+        "description": "An external console sending this universe/channel will drive the selected light.",
+        "data": {
+          "entity_id": "Home Assistant light",
+          "name": "Display name",
+          "universe": "Universe",
+          "start_channel": "Start channel",
+          "channel_mode": "Channel mode",
+          "brightness": "Brightness multiplier"
+        }
+      },
+      "add_outbound": {
+        "title": "Add an sACN fixture",
+        "description": "Creates a light entity that transmits DMX on the chosen universe and start channel.",
+        "data": {
+          "name": "Fixture name",
+          "universe": "Universe",
+          "start_channel": "Start channel",
+          "channel_mode": "Channel mode"
+        }
+      },
+      "remove_map": {
+        "title": "Remove a mapping",
+        "data": {
+          "map_id": "Mapping"
+        }
+      },
+      "settings": {
+        "title": "Network and rate settings",
+        "data": {
+          "source_name": "sACN source name",
+          "priority": "sACN priority (0-200)",
+          "bind_ip": "Network interface",
+          "receive_enabled": "Receive sACN (console → Home Assistant lights)",
+          "send_enabled": "Send sACN (Home Assistant → fixtures)",
+          "ha_update_hz": "Inbound update rate (Hz)",
+          "transition": "Inbound light transition (seconds)",
+          "white_blend": "RGBW white blend coefficient"
+        }
+      }
+    },
+    "abort": {
+      "no_maps": "There are no mappings to remove"
+    }
+  },
+  "entity": {
+    "sensor": {
+      "packets_received": {
+        "name": "sACN packets received"
+      },
+      "active_universes": {
+        "name": "Active sACN universes"
+      },
+      "receiving": {
+        "name": "sACN receive status"
+      }
+    },
+    "switch": {
+      "receive": {
+        "name": "Receive sACN"
+      },
+      "send": {
+        "name": "Send sACN"
+      }
+    }
+  },
+  "services": {
+    "add_inbound": {
+      "name": "Map sACN to a light",
+      "description": "Patch an existing light entity to a DMX universe and start channel.",
+      "fields": {
+        "entity_id": {
+          "name": "Light",
+          "description": "Home Assistant light to drive from sACN."
+        },
+        "universe": {
+          "name": "Universe",
+          "description": "E1.31 universe number."
+        },
+        "start_channel": {
+          "name": "Start channel",
+          "description": "First DMX channel (1-512)."
+        },
+        "channel_mode": {
+          "name": "Channel mode",
+          "description": "Personality, matching sACN2HomeLX whole-fixture modes."
+        },
+        "brightness": {
+          "name": "Brightness multiplier",
+          "description": "0.0-1.0 scale applied after DMX decode."
+        },
+        "name": {
+          "name": "Name",
+          "description": "Optional display name for this mapping."
+        },
+        "map_id": {
+          "name": "Mapping ID",
+          "description": "Optional stable id. Omit to generate one."
+        }
+      }
+    },
+    "add_outbound": {
+      "name": "Add sACN fixture",
+      "description": "Create a Home Assistant light that transmits sACN.",
+      "fields": {
+        "name": {
+          "name": "Name",
+          "description": "Fixture name shown in Home Assistant."
+        },
+        "universe": {
+          "name": "Universe",
+          "description": "E1.31 universe number."
+        },
+        "start_channel": {
+          "name": "Start channel",
+          "description": "First DMX channel (1-512)."
+        },
+        "channel_mode": {
+          "name": "Channel mode",
+          "description": "Personality written onto the universe."
+        },
+        "map_id": {
+          "name": "Mapping ID",
+          "description": "Optional stable id. Omit to generate one."
+        }
+      }
+    },
+    "remove_map": {
+      "name": "Remove mapping",
+      "description": "Delete an inbound or outbound mapping by id.",
+      "fields": {
+        "map_id": {
+          "name": "Mapping ID",
+          "description": "The map_id stored on the mapping."
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,103 @@
+add_inbound:
+  fields:
+    entity_id:
+      required: true
+      selector:
+        entity:
+          domain: light
+    universe:
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 63999
+          mode: box
+    start_channel:
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 512
+          mode: box
+    channel_mode:
+      required: false
+      example: rgb_8
+      selector:
+        select:
+          options:
+            - rgb_8
+            - rgb_16
+            - rgb_16_fine_first
+            - rgb_intensity_8
+            - rgbw_8
+            - rgbw_16
+            - rgbw_16_fine_first
+            - hsbk_8
+            - hsbk_16
+            - hsbk_16_fine_first
+            - hsbk_intensity_8
+    brightness:
+      required: false
+      default: 1.0
+      selector:
+        number:
+          min: 0
+          max: 1
+          step: 0.05
+    name:
+      required: false
+      selector:
+        text:
+    map_id:
+      required: false
+      selector:
+        text:
+
+add_outbound:
+  fields:
+    name:
+      required: true
+      selector:
+        text:
+    universe:
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 63999
+          mode: box
+    start_channel:
+      required: true
+      selector:
+        number:
+          min: 1
+          max: 512
+          mode: box
+    channel_mode:
+      required: false
+      example: rgb_8
+      selector:
+        select:
+          options:
+            - rgb_8
+            - rgb_16
+            - rgb_16_fine_first
+            - rgb_intensity_8
+            - rgbw_8
+            - rgbw_16
+            - rgbw_16_fine_first
+            - hsbk_8
+            - hsbk_16
+            - hsbk_16_fine_first
+            - hsbk_intensity_8
+    map_id:
+      required: false
+      selector:
+        text:
+
+remove_map:
+  fields:
+    map_id:
+      required: true
+      selector:
+        text:
