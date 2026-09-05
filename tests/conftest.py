@@ -9,7 +9,7 @@ from types import ModuleType
 
 PACKAGE = "sacn_control"
 PACKAGE_DIR = Path(__file__).resolve().parents[1] / "custom_components" / "sacn_control"
-HA_FREE_MODULES = ("const", "dmx", "models", "universe")
+HA_FREE_MODULES = ("const", "dmx", "pixels", "models", "universe")
 
 
 def _ensure_package() -> None:

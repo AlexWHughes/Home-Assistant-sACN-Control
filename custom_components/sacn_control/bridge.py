@@ -41,7 +41,14 @@ from .const import (
     RGB_CAPABLE_HA_MODES,
 )
 from .dmx import ColorCommand, decode, encode, values_changed
-from .models import InboundMap, OutboundMap, parse_inbound_maps, parse_outbound_maps
+from .models import (
+    InboundMap,
+    OutboundMap,
+    parse_inbound_maps,
+    parse_outbound_maps,
+    persist_outbound_map_ids,
+)
+from .pixels import expand_cells
 from .receiver import SacnReceiver
 from .sender import SacnSender
 from .universe import UniverseStore
@@ -120,8 +127,14 @@ class SacnBridge:
 
     def reload_mappings(self) -> None:
         """Reload patches from the config entry options."""
+        raw_outbound = self.entry.options.get(CONF_OUTBOUND_MAPS)
         self.inbound = parse_inbound_maps(self.entry.options.get(CONF_INBOUND_MAPS))
-        self.outbound = parse_outbound_maps(self.entry.options.get(CONF_OUTBOUND_MAPS))
+        self.outbound = parse_outbound_maps(raw_outbound)
+        migrated = persist_outbound_map_ids(raw_outbound, self.outbound)
+        if migrated is not None:
+            current = dict(self.entry.options)
+            current[CONF_OUTBOUND_MAPS] = migrated
+            self.hass.config_entries.async_update_entry(self.entry, options=current)
 
     def inbound_universes(self) -> set[int]:
         """Universes that inbound mappings listen on."""
@@ -260,8 +273,16 @@ class SacnBridge:
         )
 
     def write_outbound(self, mapping: OutboundMap, command: ColorCommand) -> None:
-        """Encode a Home Assistant light state onto an outbound universe."""
-        values = encode(mapping.channel_mode, command)
+        """Encode a solid colour across every physical pixel."""
+        self.write_outbound_cells(mapping, [command])
+
+    def write_outbound_cells(self, mapping: OutboundMap, cells: list[ColorCommand]) -> None:
+        """Encode per-pixel commands onto the outbound universe."""
+        if mapping.pixel_count <= 0:
+            return
+        values: list[int] = []
+        for cell in expand_cells(cells, mapping.pixel_count):
+            values.extend(encode(mapping.channel_mode, cell))
         self.store.write(mapping.universe, mapping.start_channel, values)
 
     def outbound_for_id(self, map_id: str) -> OutboundMap | None:

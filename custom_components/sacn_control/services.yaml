@@ -90,6 +90,27 @@ add_outbound:
             - hsbk_16
             - hsbk_16_fine_first
             - hsbk_intensity_8
+    pixel_count:
+      required: false
+      default: 1
+      example: 30
+      selector:
+        number:
+          min: 1
+          max: 170
+          mode: box
+    pixel_layout:
+      required: false
+      default: whole
+      example: full
+      selector:
+        select:
+          options:
+            - whole
+            - full
+            - group_8
+            - group_4
+            - group_2
     map_id:
       required: false
       selector:

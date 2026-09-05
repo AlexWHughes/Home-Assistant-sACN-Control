@@ -14,14 +14,21 @@ from .const import (
     CONF_ENTITY_ID,
     CONF_MAP_ID,
     CONF_MAP_NAME,
+    CONF_PIXEL_COUNT,
+    CONF_PIXEL_LAYOUT,
     CONF_START_CHANNEL,
     CONF_UNIVERSE,
     UNIVERSE_MAX,
     UNIVERSE_MIN,
+    PIXEL_COUNT_MAX,
+    PIXEL_COUNT_MIN,
     ChannelMode,
+    PixelLayout,
     normalize_channel_mode,
+    normalize_pixel_layout,
 )
 from .dmx import channels_for_mode
+from .pixels import clamp_pixel_count
 
 
 def _new_id() -> str:
@@ -105,11 +112,13 @@ class OutboundMap:
     universe: int
     start_channel: int
     channel_mode: ChannelMode
+    pixel_count: int
+    pixel_layout: PixelLayout
 
     @property
     def channel_count(self) -> int:
-        """DMX channels consumed by this fixture."""
-        return channels_for_mode(self.channel_mode)
+        """DMX channels consumed on the wire (one cell per physical pixel)."""
+        return channels_for_mode(self.channel_mode) * max(0, self.pixel_count)
 
     @property
     def end_channel(self) -> int:
@@ -124,20 +133,30 @@ class OutboundMap:
             CONF_UNIVERSE: self.universe,
             CONF_START_CHANNEL: self.start_channel,
             CONF_CHANNEL_MODE: self.channel_mode.value,
+            CONF_PIXEL_COUNT: self.pixel_count,
+            CONF_PIXEL_LAYOUT: self.pixel_layout.value,
         }
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> OutboundMap:
         """Parse a stored outbound mapping."""
         name = str(data.get(CONF_MAP_NAME) or "").strip() or "sACN fixture"
+        mode = normalize_channel_mode(data.get(CONF_CHANNEL_MODE))
+        start_channel = _clamp_int(
+            data.get(CONF_START_CHANNEL), CHANNEL_MIN, CHANNEL_MAX, 1
+        )
         return cls(
             map_id=str(data.get(CONF_MAP_ID) or _new_id()),
             name=name,
             universe=_clamp_int(data.get(CONF_UNIVERSE), UNIVERSE_MIN, UNIVERSE_MAX, 1),
-            start_channel=_clamp_int(
-                data.get(CONF_START_CHANNEL), CHANNEL_MIN, CHANNEL_MAX, 1
+            start_channel=start_channel,
+            channel_mode=mode,
+            pixel_count=clamp_pixel_count(
+                _clamp_int(data.get(CONF_PIXEL_COUNT), PIXEL_COUNT_MIN, PIXEL_COUNT_MAX, 1),
+                channel_mode=mode,
+                start_channel=start_channel,
             ),
-            channel_mode=normalize_channel_mode(data.get(CONF_CHANNEL_MODE)),
+            pixel_layout=normalize_pixel_layout(data.get(CONF_PIXEL_LAYOUT)),
         )
 
 
@@ -171,7 +190,85 @@ def mapping_label(mapping: InboundMap | OutboundMap) -> str:
     """Human label for options-flow removal lists."""
     mode = mapping.channel_mode.value
     span = f"U{mapping.universe} Ch {mapping.start_channel}–{mapping.end_channel}"
+    if isinstance(mapping, OutboundMap) and mapping.pixel_count > 1:
+        return f"{mapping.name} ({span}, {mode}, {mapping.pixel_count} px)"
     return f"{mapping.name} ({span}, {mode})"
+
+
+def mapping_token(mapping: InboundMap | OutboundMap) -> str:
+    """Legacy remove-form value that does not depend on a regenerated map_id."""
+    if isinstance(mapping, InboundMap):
+        return f"in|{mapping.entity_id}"
+    return (
+        f"out|{mapping.universe}|{mapping.start_channel}|"
+        f"{mapping.channel_mode.value}|{mapping.pixel_count}|"
+        f"{mapping.pixel_layout.value}|{mapping.name}"
+    )
+
+
+def mapping_removal_value(mapping: InboundMap | OutboundMap) -> str:
+    """Select value: persisted outbound map_id, otherwise the legacy token."""
+    if isinstance(mapping, OutboundMap) and mapping.map_id:
+        return mapping.map_id
+    return mapping_token(mapping)
+
+
+def persist_outbound_map_ids(
+    raw: Any, maps: list[OutboundMap]
+) -> list[dict[str, Any]] | None:
+    """Serialize outbound maps when any stored row is missing a map_id."""
+    if not maps:
+        return None
+    if isinstance(raw, list) and all(
+        isinstance(item, dict) and str(item.get(CONF_MAP_ID) or "").strip()
+        for item in raw
+    ):
+        return None
+    return [item.to_dict() for item in maps]
+
+
+def remove_mapping_by_token(
+    token: str,
+    inbound: list[InboundMap],
+    outbound: list[OutboundMap],
+) -> tuple[list[InboundMap], list[OutboundMap]] | None:
+    """Drop the mapping identified by token, map_id, entity_id, or label. None if nothing matched."""
+    raw = str(token or "").strip()
+    if not raw:
+        return None
+
+    inbound_kept = [item for item in inbound if mapping_token(item) != raw]
+    outbound_kept = [item for item in outbound if mapping_token(item) != raw]
+    if len(inbound_kept) < len(inbound) or len(outbound_kept) < len(outbound):
+        return inbound_kept, outbound_kept
+
+    inbound_kept = [item for item in inbound if item.map_id != raw]
+    outbound_kept = [item for item in outbound if item.map_id != raw]
+    if len(inbound_kept) < len(inbound) or len(outbound_kept) < len(outbound):
+        return inbound_kept, outbound_kept
+
+    inbound_kept = [item for item in inbound if item.entity_id != raw]
+    if len(inbound_kept) < len(inbound):
+        return inbound_kept, outbound
+
+    inbound_kept = [item for item in inbound if mapping_label(item) != raw]
+    outbound_kept = [item for item in outbound if mapping_label(item) != raw]
+    if len(inbound_kept) < len(inbound) or len(outbound_kept) < len(outbound):
+        return inbound_kept, outbound_kept
+
+    prefixed_in = "sACN → HA · "
+    prefixed_out = "HA → sACN · "
+    if raw.startswith(prefixed_in):
+        label = raw[len(prefixed_in) :]
+        inbound_kept = [item for item in inbound if mapping_label(item) != label]
+        if len(inbound_kept) < len(inbound):
+            return inbound_kept, outbound
+    if raw.startswith(prefixed_out):
+        label = raw[len(prefixed_out) :]
+        outbound_kept = [item for item in outbound if mapping_label(item) != label]
+        if len(outbound_kept) < len(outbound):
+            return inbound, outbound_kept
+    return None
 
 
 def _channel_overlaps(left: InboundMap, universe: int, start: int, span: int) -> bool:

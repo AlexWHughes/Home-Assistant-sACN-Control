@@ -23,6 +23,8 @@ from .const import (
     CONF_MAP_NAME,
     CONF_NEXT_STEP,
     CONF_OUTBOUND_MAPS,
+    CONF_PIXEL_COUNT,
+    CONF_PIXEL_LAYOUT,
     CONF_PRIORITY,
     CONF_RECEIVE_ENABLED,
     CONF_SEND_ENABLED,
@@ -43,7 +45,11 @@ from .const import (
     SOURCE_NAME_MAX,
     UNIVERSE_MAX,
     UNIVERSE_MIN,
+    PIXEL_COUNT_MAX,
+    PIXEL_COUNT_MIN,
+    PIXEL_LAYOUT_LABELS,
     ChannelMode,
+    PixelLayout,
 )
 from .models import (
     InboundMap,
@@ -51,14 +57,21 @@ from .models import (
     OutboundMap,
     assign_inbound_maps,
     mapping_label,
+    mapping_removal_value,
     parse_inbound_maps,
     parse_outbound_maps,
+    remove_mapping_by_token,
 )
 from .receiver import local_ipv4_addresses
 
 _MODE_OPTIONS = [
     selector.SelectOptionDict(value=mode.value, label=CHANNEL_MODE_LABELS[mode])
     for mode in ChannelMode
+]
+
+_PIXEL_LAYOUT_OPTIONS = [
+    selector.SelectOptionDict(value=layout.value, label=PIXEL_LAYOUT_LABELS[layout])
+    for layout in PixelLayout
 ]
 
 _NEXT_OPTIONS = [
@@ -186,6 +199,18 @@ def _outbound_schema() -> vol.Schema:
             vol.Required(
                 CONF_CHANNEL_MODE, default=ChannelMode.RGB_8.value
             ): selector.SelectSelector(selector.SelectSelectorConfig(options=_MODE_OPTIONS)),
+            vol.Optional(CONF_PIXEL_COUNT, default=1): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=PIXEL_COUNT_MIN,
+                    max=PIXEL_COUNT_MAX,
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Optional(
+                CONF_PIXEL_LAYOUT, default=PixelLayout.WHOLE.value
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(options=_PIXEL_LAYOUT_OPTIONS)
+            ),
         }
     )
 
@@ -288,6 +313,33 @@ class SacnControlConfigFlow(ConfigFlow, domain=DOMAIN):
         return SacnControlOptionsFlow()
 
 
+def _remove_schema(inbound: list[InboundMap], outbound: list[OutboundMap]) -> vol.Schema:
+    options = [
+        selector.SelectOptionDict(
+            value=mapping_removal_value(item),
+            label=f"sACN → HA · {mapping_label(item)}",
+        )
+        for item in inbound
+    ]
+    options.extend(
+        selector.SelectOptionDict(
+            value=mapping_removal_value(item),
+            label=f"HA → sACN · {mapping_label(item)}",
+        )
+        for item in outbound
+    )
+    return vol.Schema(
+        {
+            vol.Required(CONF_MAP_ID): selector.SelectSelector(
+                selector.SelectSelectorConfig(
+                    options=options,
+                    mode=selector.SelectSelectorMode.DROPDOWN,
+                )
+            )
+        }
+    )
+
+
 def _optional_outbound_schema() -> vol.Schema:
     return vol.Schema(
         {
@@ -305,6 +357,18 @@ def _optional_outbound_schema() -> vol.Schema:
             vol.Optional(
                 CONF_CHANNEL_MODE, default=ChannelMode.RGB_8.value
             ): selector.SelectSelector(selector.SelectSelectorConfig(options=_MODE_OPTIONS)),
+            vol.Optional(CONF_PIXEL_COUNT, default=1): selector.NumberSelector(
+                selector.NumberSelectorConfig(
+                    min=PIXEL_COUNT_MIN,
+                    max=PIXEL_COUNT_MAX,
+                    mode=selector.NumberSelectorMode.BOX,
+                )
+            ),
+            vol.Optional(
+                CONF_PIXEL_LAYOUT, default=PixelLayout.WHOLE.value
+            ): selector.SelectSelector(
+                selector.SelectSelectorConfig(options=_PIXEL_LAYOUT_OPTIONS)
+            ),
         }
     )
 
@@ -331,6 +395,7 @@ class SacnControlOptionsFlow(OptionsFlow):
             options[CONF_INBOUND_MAPS] = [item.to_dict() for item in inbound]
         if outbound is not None:
             options[CONF_OUTBOUND_MAPS] = [item.to_dict() for item in outbound]
+        self.hass.config_entries.async_update_entry(self.config_entry, options=options)
         return self.async_create_entry(title="", data=options)
 
     async def async_step_init(
@@ -399,31 +464,19 @@ class SacnControlOptionsFlow(OptionsFlow):
         """Remove an inbound or outbound mapping."""
         inbound = self._inbound()
         outbound = self._outbound()
-        choices = {item.map_id: f"sACN → HA · {mapping_label(item)}" for item in inbound}
-        choices.update(
-            {item.map_id: f"HA → sACN · {mapping_label(item)}" for item in outbound}
-        )
-        if not choices:
+        if not inbound and not outbound:
             return self.async_abort(reason="no_maps")
         if user_input is not None:
-            map_id = user_input[CONF_MAP_ID]
-            return self._write(
-                inbound=[item for item in inbound if item.map_id != map_id],
-                outbound=[item for item in outbound if item.map_id != map_id],
-            )
-        schema = vol.Schema(
-            {
-                vol.Required(CONF_MAP_ID): selector.SelectSelector(
-                    selector.SelectSelectorConfig(
-                        options=[
-                            selector.SelectOptionDict(value=key, label=label)
-                            for key, label in choices.items()
-                        ]
-                    )
+            removed = remove_mapping_by_token(str(user_input.get(CONF_MAP_ID) or ""), inbound, outbound)
+            if removed is None:
+                return self.async_show_form(
+                    step_id="remove",
+                    data_schema=_remove_schema(inbound, outbound),
+                    errors={CONF_MAP_ID: "mapping_not_found"},
                 )
-            }
-        )
-        return self.async_show_form(step_id="remove", data_schema=schema)
+            new_inbound, new_outbound = removed
+            return self._write(inbound=new_inbound, outbound=new_outbound)
+        return self.async_show_form(step_id="remove", data_schema=_remove_schema(inbound, outbound))
 
     async def async_step_settings(
         self, user_input: dict[str, Any] | None = None

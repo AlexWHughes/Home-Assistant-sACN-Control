@@ -7,7 +7,7 @@ A Home Assistant custom integration (HACS) that bridges **sACN / E1.31** both wa
 
 This is the in-process sister of [sACN2HomeLX](https://github.com/AlexWHughes/sACN2LIFX). That app discovers LIFX, Nanoleaf, and Home Assistant lights over the LAN/REST and maps them from a standalone UI. This integration runs *inside* Home Assistant, so inbound updates call `light.turn_on` / `turn_off` directly (no long-lived token) and outbound fixtures show up as normal HA lights.
 
-Channel personalities match sACN2HomeLX whole-fixture modes (RGB / RGBW / HSBK, 8-bit and 16-bit). Home Assistant lights stay whole-fixture; pixel/matrix modes stay in sACN2HomeLX.
+Channel personalities match sACN2HomeLX whole-fixture modes (RGB / RGBW / HSBK, 8-bit and 16-bit). One outbound fixture can cover a strip or bar (up to 170 RGB pixels, clamped to the remaining channels on that universe). 2D matrix layouts stay in sACN2HomeLX.
 
 ## Install with HACS
 
@@ -38,7 +38,7 @@ On first setup you choose:
 During setup you will be asked to:
 
 1. **Select Home Assistant lights** that incoming sACN should drive (multi-select). New lights are patched from the start channel, in order. Leave empty to skip.
-2. **Add an sACN fixture** — type a name to create a Home Assistant light that transmits on that universe/channel. Leave the name blank to skip.
+2. **Add an sACN fixture** — type a name to create a Home Assistant light that transmits on that universe/channel. Set **Pixels** above 1 to drive a whole strip from that one light. Leave the name blank to skip.
 
 Later, open **Configure** on the integration to change those mappings: pick which lights follow sACN, add more fixtures, remove a patch, or retune network settings.
 
@@ -77,11 +77,38 @@ The integration ignores its own CID so a universe used in both directions does n
 
 Example: Universe 1, start channel 1, RGB (8bit) → ch 1 red, ch 2 green, ch 3 blue.
 
+## Multi-pixel fixtures
+
+An outbound fixture still appears as **one** Home Assistant light. The patch occupies `pixels × channels-per-cell` on the universe (RGB 8-bit × 30 pixels = 90 channels). Existing mappings without these fields stay 1 pixel / whole fixture.
+
+| Pixel layout | What it does |
+| --- | --- |
+| **Whole fixture** | The same colour is written to every pixel. Effects that need spatial layout fall back to one cell. |
+| **Full pixel** | One DMX cell per pixel. Rainbow / chase / theater can address each pixel. |
+| **RGB 8 / 4 / 2 pixel groups** | Effects paint 8, 4, or 2 addressable groups, then those cells are stretched across the physical pixels. |
+
+A solid colour (or **off**) always writes every physical pixel. Pixel count is clamped so the fixture cannot run past channel 512.
+
+### Effects
+
+Outbound lights support Home Assistant’s built-in **Effect** control (about 20 fps):
+
+| Effect | Behaviour |
+| --- | --- |
+| **off** | Solid colour on every pixel |
+| **rainbow** | Hue steps across groups or pixels |
+| **chase** | A bright cell walks the fixture |
+| **colorloop** | Whole-fixture hue cycle |
+| **strobe** | Alternating on / black |
+| **theater** | Every third cell lit, walking |
+
+Use `light.turn_on` with `effect: rainbow` (or any name above) from an automation the same way you would on a native effect light.
+
 ## Entities
 
 | Entity | Role |
 | --- | --- |
-| `light.<fixture>` | One per outbound mapping |
+| `light.<fixture>` | One per outbound mapping (colour, brightness, and effect) |
 | `switch.s_acn_control_receive_sacn` | Start/stop inbound reception |
 | `switch.s_acn_control_send_sacn` | Start/stop outbound transmission |
 | `sensor.s_acn_control_sacn_receive_status` | `receiving` or `idle` |
@@ -95,7 +122,7 @@ Inbound mappings do **not** create extra lights; they drive lights you already h
 ## How this differs from other options
 
 - **Core `sacn` integration** — output only. This one receives and sends, and patches existing HA lights.
-- **sACN2HomeLX** — standalone mapper for LIFX, Nanoleaf, and HA-over-REST, including pixel fixtures. Use it when you need LIFX LAN, Nanoleaf streaming, or per-pixel modes. Use this integration when HA should be the hub.
+- **sACN2HomeLX** — standalone mapper for LIFX, Nanoleaf, and HA-over-REST, including 2D pixel/matrix fixtures. Use it when you need LIFX LAN, Nanoleaf streaming, or matrix layouts. Use this integration when HA should be the hub.
 
 Do not let this integration and another sACN sender share the same universe at the same priority unless you intend HTP/priority takeover.
 
