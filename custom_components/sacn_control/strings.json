@@ -28,12 +28,14 @@
       },
       "outbound": {
         "title": "Add an sACN fixture",
-        "description": "Creates a Home Assistant light that transmits sACN. Leave the name blank to skip.",
+        "description": "Creates a Home Assistant light that transmits sACN. Set pixel count above 1 to drive a strip or bar from one fixture. Leave the name blank to skip.",
         "data": {
           "name": "Fixture name",
           "universe": "Universe",
           "start_channel": "Start channel",
-          "channel_mode": "Channel mode"
+          "channel_mode": "Channel mode",
+          "pixel_count": "Pixels",
+          "pixel_layout": "Pixel layout"
         }
       }
     },
@@ -66,12 +68,14 @@
       },
       "outbound": {
         "title": "Add an sACN fixture",
-        "description": "Creates a Home Assistant light that transmits DMX on the chosen universe and start channel.",
+        "description": "Creates a Home Assistant light that transmits DMX on the chosen universe and start channel. One fixture can cover a multi-pixel strip.",
         "data": {
           "name": "Fixture name",
           "universe": "Universe",
           "start_channel": "Start channel",
-          "channel_mode": "Channel mode"
+          "channel_mode": "Channel mode",
+          "pixel_count": "Pixels",
+          "pixel_layout": "Pixel layout"
         }
       },
       "remove": {
@@ -98,7 +102,8 @@
       "no_maps": "There are no mappings to remove"
     },
     "error": {
-      "no_channel_capacity": "No contiguous DMX channel span remains on this universe. Choose fewer lights, another universe, or a lower start channel."
+      "no_channel_capacity": "No contiguous DMX channel span remains on this universe. Choose fewer lights, another universe, or a lower start channel.",
+      "mapping_not_found": "That mapping could not be removed. Pick it again from the list."
     }
   },
   "entity": {
@@ -159,7 +164,7 @@
     },
     "add_outbound": {
       "name": "Add sACN fixture",
-      "description": "Create a Home Assistant light that transmits sACN.",
+      "description": "Create a Home Assistant light that transmits sACN. Pixel count above 1 writes one cell per pixel on the same universe.",
       "fields": {
         "name": {
           "name": "Name",
@@ -176,6 +181,14 @@
         "channel_mode": {
           "name": "Channel mode",
           "description": "Personality written onto the universe."
+        },
+        "pixel_count": {
+          "name": "Pixels",
+          "description": "Physical pixels on this fixture (1–170). Clamped so the patch stays in one universe."
+        },
+        "pixel_layout": {
+          "name": "Pixel layout",
+          "description": "Whole fixture, one cell per pixel, or 8/4/2 addressable groups for effects."
         },
         "map_id": {
           "name": "Mapping ID",

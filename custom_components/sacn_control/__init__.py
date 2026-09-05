@@ -22,15 +22,26 @@ from .const import (
     CONF_MAP_ID,
     CONF_MAP_NAME,
     CONF_OUTBOUND_MAPS,
+    CONF_PIXEL_COUNT,
+    CONF_PIXEL_LAYOUT,
     CONF_START_CHANNEL,
     CONF_UNIVERSE,
     DOMAIN,
     PLATFORMS,
+    PIXEL_COUNT_MAX,
+    PIXEL_COUNT_MIN,
     UNIVERSE_MAX,
     UNIVERSE_MIN,
     ChannelMode,
+    PixelLayout,
 )
-from .models import InboundMap, OutboundMap, parse_inbound_maps, parse_outbound_maps
+from .models import (
+    InboundMap,
+    OutboundMap,
+    parse_inbound_maps,
+    parse_outbound_maps,
+    remove_mapping_by_token,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -106,17 +117,13 @@ def _register_services(hass: HomeAssistant) -> None:
         bridge = _bridge(hass)
         if bridge is None:
             return
-        map_id = str(call.data.get(CONF_MAP_ID) or "")
-        inbound = [
-            item
-            for item in parse_inbound_maps(bridge.entry.options.get(CONF_INBOUND_MAPS))
-            if item.map_id != map_id
-        ]
-        outbound = [
-            item
-            for item in parse_outbound_maps(bridge.entry.options.get(CONF_OUTBOUND_MAPS))
-            if item.map_id != map_id
-        ]
+        token = str(call.data.get(CONF_MAP_ID) or "")
+        inbound = parse_inbound_maps(bridge.entry.options.get(CONF_INBOUND_MAPS))
+        outbound = parse_outbound_maps(bridge.entry.options.get(CONF_OUTBOUND_MAPS))
+        removed = remove_mapping_by_token(token, inbound, outbound)
+        if removed is None:
+            return
+        inbound, outbound = removed
         _update_options(hass, bridge, inbound=inbound, outbound=outbound)
 
     hass.services.async_register(
@@ -155,6 +162,10 @@ def _register_services(hass: HomeAssistant) -> None:
                     vol.Coerce(int), vol.Range(min=CHANNEL_MIN, max=CHANNEL_MAX)
                 ),
                 vol.Optional(CONF_CHANNEL_MODE, default=ChannelMode.RGB_8): cv.string,
+                vol.Optional(CONF_PIXEL_COUNT, default=1): vol.All(
+                    vol.Coerce(int), vol.Range(min=PIXEL_COUNT_MIN, max=PIXEL_COUNT_MAX)
+                ),
+                vol.Optional(CONF_PIXEL_LAYOUT, default=PixelLayout.WHOLE): cv.string,
                 vol.Optional(CONF_MAP_ID): cv.string,
             }
         ),

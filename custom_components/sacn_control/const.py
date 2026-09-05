@@ -29,6 +29,8 @@ CONF_NEXT_STEP: Final = "next_step"
 CONF_UNIVERSE: Final = "universe"
 CONF_START_CHANNEL: Final = "start_channel"
 CONF_CHANNEL_MODE: Final = "channel_mode"
+CONF_PIXEL_COUNT: Final = "pixel_count"
+CONF_PIXEL_LAYOUT: Final = "pixel_layout"
 CONF_BRIGHTNESS: Final = "brightness"
 CONF_MAP_NAME: Final = "name"
 
@@ -59,6 +61,44 @@ ATTR_START_CHANNEL: Final = "start_channel"
 ATTR_CHANNEL_MODE: Final = "channel_mode"
 ATTR_PACKETS: Final = "packets_received"
 ATTR_ACTIVE_UNIVERSES: Final = "active_universes"
+ATTR_PIXEL_COUNT: Final = "pixel_count"
+ATTR_PIXEL_LAYOUT: Final = "pixel_layout"
+
+PIXEL_COUNT_MIN: Final = 1
+PIXEL_COUNT_MAX: Final = 170
+EFFECT_INTERVAL_S: Final = 0.05
+
+EFFECT_OFF: Final = "off"
+EFFECT_RAINBOW: Final = "rainbow"
+EFFECT_CHASE: Final = "chase"
+EFFECT_COLORLOOP: Final = "colorloop"
+EFFECT_STROBE: Final = "strobe"
+EFFECT_THEATER: Final = "theater"
+
+
+class PixelLayout(StrEnum):
+    """How a multi-pixel outbound fixture is addressed."""
+
+    WHOLE = "whole"
+    FULL = "full"
+    GROUP_8 = "group_8"
+    GROUP_4 = "group_4"
+    GROUP_2 = "group_2"
+
+
+PIXEL_LAYOUT_LABELS: dict[PixelLayout, str] = {
+    PixelLayout.WHOLE: "Whole fixture (same colour on every pixel)",
+    PixelLayout.FULL: "Full pixel (one DMX cell per pixel)",
+    PixelLayout.GROUP_8: "RGB 8 pixel groups",
+    PixelLayout.GROUP_4: "RGB 4 pixel groups",
+    PixelLayout.GROUP_2: "RGB 2 pixel groups",
+}
+
+PIXEL_GROUP_COUNTS: dict[PixelLayout, int] = {
+    PixelLayout.GROUP_8: 8,
+    PixelLayout.GROUP_4: 4,
+    PixelLayout.GROUP_2: 2,
+}
 
 
 class ChannelKind(StrEnum):
@@ -157,3 +197,16 @@ def normalize_channel_mode(value: str | ChannelMode | None) -> ChannelMode:
     if raw in _LABEL_TO_MODE:
         return _LABEL_TO_MODE[raw]
     return ChannelMode.RGB_8
+
+
+def normalize_pixel_layout(value: str | PixelLayout | None) -> PixelLayout:
+    """Resolve a stored pixel layout key."""
+    if isinstance(value, PixelLayout):
+        return value
+    if not value:
+        return PixelLayout.WHOLE
+    raw = str(value).strip()
+    try:
+        return PixelLayout(raw)
+    except ValueError:
+        return PixelLayout.WHOLE
