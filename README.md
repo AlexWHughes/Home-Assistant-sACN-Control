@@ -12,14 +12,14 @@ Channel personalities match sACN2HomeLX whole-fixture modes (RGB / RGBW / HSBK, 
 ## Install with HACS
 
 1. HACS → **⋯** → **Custom repositories**
-2. Add this repository URL as category **Integration**
+2. Add [`https://github.com/AlexWHughes/Home-Assistant-sACN-Control`](https://github.com/AlexWHughes/Home-Assistant-sACN-Control) as category **Integration**
 3. Search for **sACN Control** and install
 4. Restart Home Assistant
 5. **Settings → Devices & services → Add integration → sACN Control**
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=AlexWHughes&repository=ha-sacn-control&category=integration)
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=AlexWHughes&repository=Home-Assistant-sACN-Control&category=integration)
 
-Until the repo is on GitHub, copy `custom_components/sacn_control` into your Home Assistant `config/custom_components/` folder, restart, then add the integration from the UI.
+Manual install: copy `custom_components/sacn_control` into your Home Assistant `config/custom_components/` folder, restart, then add the integration from the UI.
 
 ## Configure
 
