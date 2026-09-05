@@ -14,39 +14,59 @@
           "transition": "Inbound light transition (seconds)",
           "white_blend": "RGBW white blend coefficient"
         }
+      },
+      "inbound": {
+        "title": "Lights controlled by sACN",
+        "description": "Pick the Home Assistant lights a console should drive. Newly selected lights are patched from the start channel, in order. Leave empty to skip.",
+        "data": {
+          "entity_ids": "Home Assistant lights",
+          "universe": "Universe",
+          "start_channel": "Start channel for new lights",
+          "channel_mode": "Channel mode for new lights",
+          "brightness": "Brightness multiplier"
+        }
+      },
+      "outbound": {
+        "title": "Add an sACN fixture",
+        "description": "Creates a Home Assistant light that transmits sACN. Leave the name blank to skip.",
+        "data": {
+          "name": "Fixture name",
+          "universe": "Universe",
+          "start_channel": "Start channel",
+          "channel_mode": "Channel mode"
+        }
       }
     },
     "abort": {
       "already_configured": "sACN Control is already configured"
+    },
+    "error": {
+      "no_channel_capacity": "No contiguous DMX channel span remains on this universe. Choose fewer lights, another universe, or a lower start channel."
     }
   },
   "options": {
     "step": {
       "init": {
         "title": "sACN Control",
-        "description": "Patch lights to DMX or create sACN fixtures.",
-        "menu_options": {
-          "add_inbound": "Map sACN → Home Assistant light",
-          "add_outbound": "Add sACN fixture (Home Assistant → sACN)",
-          "remove_map": "Remove a mapping",
-          "settings": "Network and rate settings"
+        "description": "{summary}",
+        "data": {
+          "next_step": "What do you want to change?"
         }
       },
-      "add_inbound": {
-        "title": "Map sACN to a light",
-        "description": "An external console sending this universe/channel will drive the selected light.",
+      "inbound": {
+        "title": "Lights controlled by sACN",
+        "description": "Select every Home Assistant light that should follow incoming sACN. Deselect a light to stop controlling it. Already-patched lights keep their universe and channel; new lights are addressed from the start channel.",
         "data": {
-          "entity_id": "Home Assistant light",
-          "name": "Display name",
-          "universe": "Universe",
-          "start_channel": "Start channel",
-          "channel_mode": "Channel mode",
+          "entity_ids": "Home Assistant lights",
+          "universe": "Universe for new lights",
+          "start_channel": "Start channel for new lights",
+          "channel_mode": "Channel mode for new lights",
           "brightness": "Brightness multiplier"
         }
       },
-      "add_outbound": {
+      "outbound": {
         "title": "Add an sACN fixture",
-        "description": "Creates a light entity that transmits DMX on the chosen universe and start channel.",
+        "description": "Creates a Home Assistant light that transmits DMX on the chosen universe and start channel.",
         "data": {
           "name": "Fixture name",
           "universe": "Universe",
@@ -54,7 +74,7 @@
           "channel_mode": "Channel mode"
         }
       },
-      "remove_map": {
+      "remove": {
         "title": "Remove a mapping",
         "data": {
           "map_id": "Mapping"
@@ -76,6 +96,9 @@
     },
     "abort": {
       "no_maps": "There are no mappings to remove"
+    },
+    "error": {
+      "no_channel_capacity": "No contiguous DMX channel span remains on this universe. Choose fewer lights, another universe, or a lower start channel."
     }
   },
   "entity": {

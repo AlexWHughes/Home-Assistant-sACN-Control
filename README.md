@@ -35,11 +35,12 @@ On first setup you choose:
 | **Transition** | Seconds passed to `light.turn_on` / `turn_off` (default 0.05) |
 | **RGBW white blend** | How much the white channel is mixed into RGB on inbound RGBW (default 0.3) |
 
-Then open **Configure** on the integration:
+During setup you will be asked to:
 
-1. **Map sACN → Home Assistant light** — pick a `light.*` entity, universe, start channel, and mode
-2. **Add sACN fixture** — creates a new light that transmits on that address
-3. **Remove a mapping** or retune network settings
+1. **Select Home Assistant lights** that incoming sACN should drive (multi-select). New lights are patched from the start channel, in order. Leave empty to skip.
+2. **Add an sACN fixture** — type a name to create a Home Assistant light that transmits on that universe/channel. Leave the name blank to skip.
+
+Later, open **Configure** on the integration to change those mappings: pick which lights follow sACN, add more fixtures, remove a patch, or retune network settings.
 
 Services `sacn_control.add_inbound`, `sacn_control.add_outbound`, and `sacn_control.remove_map` do the same thing from automations.
 

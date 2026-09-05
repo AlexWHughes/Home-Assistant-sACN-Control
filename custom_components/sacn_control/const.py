@@ -24,6 +24,8 @@ CONF_OUTBOUND_MAPS: Final = "outbound_maps"
 
 CONF_MAP_ID: Final = "map_id"
 CONF_ENTITY_ID: Final = "entity_id"
+CONF_ENTITY_IDS: Final = "entity_ids"
+CONF_NEXT_STEP: Final = "next_step"
 CONF_UNIVERSE: Final = "universe"
 CONF_START_CHANNEL: Final = "start_channel"
 CONF_CHANNEL_MODE: Final = "channel_mode"
