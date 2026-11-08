@@ -119,6 +119,39 @@ Exact entity IDs follow your entity registry names.
 
 Inbound mappings do **not** create extra lights; they drive lights you already have.
 
+## Using sACN from another integration
+
+Other integrations can take raw DMX from this integration's receiver instead of opening their own socket on port 5568. This suits devices that cannot receive sACN themselves but have a real-time protocol an integration can speak, for example pixel strings driven per pixel. Devices with native E1.31 support, such as ESPHome lights with the `e131` component, are better sent sACN directly.
+
+```python
+from homeassistant.core import HomeAssistant, callback
+
+
+async def async_setup_entry(hass: HomeAssistant, entry) -> bool:
+    registry = hass.data.get("sacn_control_listeners")
+    if registry is not None:
+
+        @callback
+        def on_dmx(universe: int, dmx: tuple[int, ...]) -> None:
+            ...  # all 512 slots, each time the data on the universe changes
+
+        @callback
+        def on_lost(universe: int) -> None:
+            ...  # stream stopped (data loss timeout or termination) or reception stopped
+
+        entry.async_on_unload(registry.register([1, 2], on_dmx, on_lost))
+    return True
+```
+
+Add `"after_dependencies": ["sacn_control"]` to your manifest so the registry exists before your integration sets up. `custom_components.sacn_control.async_register_dmx_listener(hass, universes, on_dmx, on_lost)` does the same if you would rather import it.
+
+- Callbacks run on the event loop. `on_dmx` gets each changed frame as it arrives, not at the inbound update rate, and a new subscriber gets the current frame of any live universe straight away, so a static scene is not missed. Frames are tuples, shared between listeners.
+- The receiver joins subscribed universes as well as those used by inbound light mappings, starts when either needs it, and changes subscriptions without reopening its socket.
+- Priority and sequence checks happen in the receiver: data comes from the highest-priority source, and sources at equal priority interleave. Any source terminating its stream on a universe, including a lower-priority backup, ends it for a moment: listeners get `on_lost`, then data again with the next packet from a source still sending.
+- Subscriptions survive the config entry reloading when mappings change, but each reload stops reception briefly, so listeners get `on_lost` and then the next frame.
+- The **Receive** switch applies: switching it off stops delivery and calls `on_lost` for every subscribed universe.
+- Register from the event loop; `async_register_dmx_listener` checks this.
+
 ## How this differs from other options
 
 - **Core `sacn` integration** — output only. This one receives and sends, and patches existing HA lights.

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import timedelta
 import logging
 import time
@@ -15,7 +16,7 @@ from homeassistant.components.light import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import ATTR_ENTITY_ID, SERVICE_TURN_OFF, SERVICE_TURN_ON
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.event import async_track_time_interval
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator
 
@@ -41,6 +42,7 @@ from .const import (
     RGB_CAPABLE_HA_MODES,
 )
 from .dmx import ColorCommand, decode, encode, values_changed
+from .listeners import DmxListenerRegistry
 from .models import (
     InboundMap,
     OutboundMap,
@@ -61,9 +63,15 @@ _RECEIVE_STALE_S = 2.0
 class SacnBridge:
     """Owns the sACN sockets and applies inbound/outbound mappings."""
 
-    def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
+    def __init__(
+        self,
+        hass: HomeAssistant,
+        entry: ConfigEntry,
+        listeners: DmxListenerRegistry,
+    ) -> None:
         self.hass = hass
         self.entry = entry
+        self.listeners = listeners
         self.store = UniverseStore()
         self.sender = SacnSender(
             bind_ip=_optional_ip(entry.data.get(CONF_BIND_IP)),
@@ -74,12 +82,19 @@ class SacnBridge:
             bind_ip=_optional_ip(entry.data.get(CONF_BIND_IP)),
             on_dmx=self._on_dmx,
             ignore_cid=self.sender.cid,
+            on_lost=self._on_lost,
         )
         self.inbound: list[InboundMap] = []
         self.outbound: list[OutboundMap] = []
         self._latest_dmx: dict[int, list[int]] = {}
+        # Universes with a stream right now; written by the receiver thread.
+        self._live: set[int] = set()
         self._last_applied: dict[str, list[int]] = {}
         self._inbound_dirty = False
+        # Serialises receiver changes, which run in the executor, so they apply
+        # in order and none can restart the receiver after async_stop.
+        self._receiver_lock = asyncio.Lock()
+        self._stopped = False
         self._unsub_tick = None
         self._last_stats_push = 0.0
         self.coordinator = DataUpdateCoordinator(
@@ -140,13 +155,21 @@ class SacnBridge:
         """Universes that inbound mappings listen on."""
         return {item.universe for item in self.inbound}
 
+    def receive_universes(self) -> set[int]:
+        """Universes the receiver joins: inbound mappings plus DMX listeners."""
+        return self.inbound_universes() | self.listeners.universes
+
     def outbound_universes(self) -> set[int]:
         """Universes that outbound fixtures transmit on."""
         return {item.universe for item in self.outbound}
 
     async def async_start(self) -> None:
         """Open sockets and start the inbound apply tick."""
-        await self.hass.async_add_executor_job(self._start_sockets)
+        # Before the receiver starts, so a listener registering meanwhile is seen.
+        self.listeners.set_change_callback(self._on_listener_universes_changed)
+        self.listeners.set_frame_source(self._current_frame)
+        await self.hass.async_add_executor_job(self._start_sender)
+        await self._async_sync_receiver()
         interval = 1.0 / self.ha_update_hz
         self._unsub_tick = async_track_time_interval(
             self.hass,
@@ -160,14 +183,18 @@ class SacnBridge:
         if self._unsub_tick is not None:
             self._unsub_tick()
             self._unsub_tick = None
-        await self.hass.async_add_executor_job(self._stop_sockets)
+        self.listeners.set_change_callback(None)
+        self.listeners.set_frame_source(None)
+        async with self._receiver_lock:
+            self._stopped = True
+            await self.hass.async_add_executor_job(self._stop_sockets)
+        self._live.clear()
+        self.listeners.lost_all()
 
-    def _start_sockets(self) -> None:
+    def _start_sender(self) -> None:
         if self.send_enabled and self.outbound:
             self.sender.start()
             self.sender.sync_universes(self.outbound_universes(), self.store)
-        if self.receive_enabled and self.inbound:
-            self.receiver.start(self.inbound_universes())
 
     def _stop_sockets(self) -> None:
         self.receiver.stop()
@@ -179,7 +206,10 @@ class SacnBridge:
             self.entry,
             data={**self.entry.data, CONF_RECEIVE_ENABLED: enabled},
         )
-        await self.hass.async_add_executor_job(self._apply_receive_state, enabled)
+        await self._async_sync_receiver()
+        if not enabled:
+            self._live.clear()
+            self.listeners.lost_all()
 
     async def async_set_send(self, enabled: bool) -> None:
         """Enable or disable outbound transmission."""
@@ -189,11 +219,20 @@ class SacnBridge:
         )
         await self.hass.async_add_executor_job(self._apply_send_state, enabled)
 
-    def _apply_receive_state(self, enabled: bool) -> None:
-        if enabled and self.inbound:
-            self.receiver.start(self.inbound_universes())
-            return
-        self.receiver.stop()
+    async def _async_sync_receiver(self) -> None:
+        """Start, resubscribe or stop the receiver to match what is wanted."""
+        async with self._receiver_lock:
+            if self._stopped:
+                return
+            # Read on the loop, under the lock, so the latest wanted set wins.
+            universes = self.receive_universes() if self.receive_enabled else set()
+            await self.hass.async_add_executor_job(self.receiver.sync, universes)
+
+    @callback
+    def _on_listener_universes_changed(self) -> None:
+        self.entry.async_create_background_task(
+            self.hass, self._async_sync_receiver(), "sacn_control receiver resubscribe"
+        )
 
     def _apply_send_state(self, enabled: bool) -> None:
         if enabled and self.outbound:
@@ -209,7 +248,31 @@ class SacnBridge:
         _cid: tuple[int, ...] | None,
     ) -> None:
         self._latest_dmx[universe] = dmx
+        self._live.add(universe)
         self._inbound_dirty = True
+        if self.listeners.has_universe(universe):
+            # Receiver thread: hand each frame to the event loop as it arrives,
+            # not at the inbound tick rate.
+            self.hass.loop.call_soon_threadsafe(self._deliver_dmx, universe, tuple(dmx))
+
+    @callback
+    def _deliver_dmx(self, universe: int, dmx: tuple[int, ...]) -> None:
+        # A frame queued just before the receiver stopped would otherwise reach
+        # listeners after lost_all() told them the stream had ended.
+        if self.receiver.running:
+            self.listeners.dispatch(universe, dmx)
+
+    def _current_frame(self, universe: int) -> list[int] | None:
+        """Latest frame of a live universe, for replay to a new listener."""
+        if not self.receiver.running or universe not in self._live:
+            return None
+        return self._latest_dmx.get(universe)
+
+    def _on_lost(self, universe: int) -> None:
+        # Receiver thread.
+        self._live.discard(universe)
+        if self.listeners.has_universe(universe):
+            self.hass.loop.call_soon_threadsafe(self.listeners.lost, universe)
 
     async def _async_tick(self, _now: Any = None) -> None:
         if self.receive_enabled and self._inbound_dirty:
@@ -310,6 +373,8 @@ class SacnBridge:
             "packets_per_universe": dict(self.receiver.packets_per_universe),
             "inbound_count": len(self.inbound),
             "outbound_count": len(self.outbound),
+            "listener_count": self.listeners.count,
+            "listener_universes": sorted(self.listeners.universes),
             "bind_ip": self.entry.data.get(CONF_BIND_IP) or "",
             "source_name": self.entry.data.get(CONF_SOURCE_NAME) or DEFAULT_SOURCE_NAME,
             "priority": self.entry.data.get(CONF_PRIORITY, DEFAULT_PRIORITY),

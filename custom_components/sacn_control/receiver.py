@@ -27,6 +27,7 @@ except ImportError:  # pragma: no cover
 
 
 OnDmx = Callable[[int, list[int], tuple[int, ...] | None], None]
+OnLost = Callable[[int], None]
 
 
 def local_ipv4_addresses() -> list[str]:
@@ -56,18 +57,26 @@ class SacnReceiver:
         bind_ip: str | None,
         on_dmx: OnDmx,
         ignore_cid: tuple[int, ...] | None = None,
+        on_lost: OnLost | None = None,
     ) -> None:
         self._bind_ip = bind_ip or None
         self._on_dmx = on_dmx
+        self._on_lost = on_lost
         self._ignore_cid = ignore_cid
         self._lock = threading.RLock()
         self._receiver: Any = None
+        self._handlers: dict[int, Callable[[Any], None]] = {}
         self._universes: set[int] = set()
         self._running = False
         self.packets_received = 0
         self.last_packet_time: float | None = None
         self.active_universes: set[int] = set()
         self.packets_per_universe: dict[int, int] = {}
+
+    @property
+    def running(self) -> bool:
+        """True while the receiver socket is open."""
+        return self._running
 
     @property
     def receiving(self) -> bool:
@@ -84,7 +93,9 @@ class SacnReceiver:
             self.stop()
             self._universes = set(universes)
             self._receiver = sacn.sACNreceiver()
+            self._handlers = {}
             self._apply_multicast_interface()
+            self._receiver.register_listener("availability", self._handle_availability)
             self._receiver.start()
             for universe in sorted(self._universes):
                 self._register(universe)
@@ -96,14 +107,31 @@ class SacnReceiver:
             )
 
     def update_universes(self, universes: set[int]) -> None:
-        """Restart subscriptions when the mapped universe set changes."""
+        """Change subscriptions on the running receiver without reopening the socket.
+
+        Reopening would drop the library's per-universe state, so a stream
+        that ended during the gap would never report a timeout.
+        """
         with self._lock:
-            if universes == self._universes and self._running:
+            wanted = set(universes)
+            if not self._running or self._receiver is None:
+                self._universes = wanted
                 return
-            if not self._running:
-                self._universes = set(universes)
-                return
-            self.start(universes)
+            for universe in sorted(self._universes - wanted):
+                self._unregister(universe)
+            for universe in sorted(wanted - self._universes):
+                self._register(universe)
+            self._universes = wanted
+
+    def sync(self, universes: set[int]) -> None:
+        """Run with exactly these universes: start, resubscribe or stop as needed."""
+        with self._lock:
+            if not universes:
+                self.stop()
+            elif self._running:
+                self.update_universes(universes)
+            else:
+                self.start(universes)
 
     def stop(self) -> None:
         """Stop the receiver."""
@@ -136,8 +164,36 @@ class SacnReceiver:
         def handle_dmx(packet: Any) -> None:
             self._handle_packet(universe, packet)
 
+        self._handlers[universe] = handle_dmx
         self._receiver.register_listener("universe", handle_dmx, universe=universe)
         self._join_multicast(universe)
+
+    def _unregister(self, universe: int) -> None:
+        handler = self._handlers.pop(universe, None)
+        if handler is not None:
+            # register_listener also files the handler under the trigger name,
+            # which remove_listener_from_universe leaves behind.
+            self._receiver.remove_listener(handler)
+        self._receiver.remove_listener_from_universe(universe)
+        try:
+            self._receiver.leave_multicast(universe)
+        except Exception as err:  # noqa: BLE001
+            _LOGGER.debug("Could not leave multicast for universe %s: %s", universe, err)
+        sock_impl = getattr(getattr(self._receiver, "_handler", None), "socket", None)
+        raw = getattr(sock_impl, "_socket", None)
+        ips = self._membership_ips()
+        if calculate_multicast_addr is None or raw is None or len(ips) <= 1:
+            return
+        mcast = calculate_multicast_addr(universe)
+        for ip in ips[1:]:
+            try:
+                raw.setsockopt(
+                    socket.IPPROTO_IP,
+                    socket.IP_DROP_MEMBERSHIP,
+                    socket.inet_aton(mcast) + socket.inet_aton(ip),
+                )
+            except OSError:
+                pass
 
     def _join_multicast(self, universe: int) -> None:
         ips = self._membership_ips()
@@ -172,8 +228,32 @@ class SacnReceiver:
                     err,
                 )
 
+    def _handle_availability(self, universe: int, changed: str) -> None:
+        """The sacn library reports 'timeout' on data loss or stream termination."""
+        if changed == "available":
+            # The library only delivers data that differs from the last data it
+            # saw on the universe, and keeps that across a timeout, so a stream
+            # resuming with the same look would never be delivered. This runs
+            # on the receiver thread before the packet's data is compared.
+            handler = getattr(self._receiver, "_handler", None)
+            previous = getattr(handler, "_previousData", None)
+            if isinstance(previous, dict):
+                previous.pop(universe, None)
+            return
+        if not self._running or changed != "timeout" or self._on_lost is None:
+            return
+        try:
+            self._on_lost(universe)
+        except Exception:  # noqa: BLE001
+            _LOGGER.exception("Error delivering sACN stream loss for universe %s", universe)
+
     def _handle_packet(self, universe: int, packet: Any) -> None:
         if not self._running:
+            return
+        if getattr(packet, "option_StreamTerminated", False):
+            # E1.31 6.2.6: property values in a terminating packet are ignored.
+            # The sacn library reports the stream lost and then still delivers
+            # this packet's data, which would revive a stream that has ended.
             return
         cid = _packet_cid(packet)
         if self._ignore_cid is not None and cid == self._ignore_cid:

@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 import logging
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import Platform
-from homeassistant.core import HomeAssistant, ServiceCall
+from homeassistant.core import CALLBACK_TYPE, HomeAssistant, ServiceCall, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers.typing import ConfigType
 import voluptuous as vol
@@ -26,6 +28,7 @@ from .const import (
     CONF_PIXEL_LAYOUT,
     CONF_START_CHANNEL,
     CONF_UNIVERSE,
+    DATA_LISTENERS,
     DOMAIN,
     PLATFORMS,
     PIXEL_COUNT_MAX,
@@ -35,6 +38,7 @@ from .const import (
     ChannelMode,
     PixelLayout,
 )
+from .listeners import DmxListenerRegistry, OnListenerDmx, OnListenerLost
 from .models import (
     InboundMap,
     OutboundMap,
@@ -51,13 +55,42 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
     """Set up the integration domain and register services."""
     hass.data.setdefault(DOMAIN, {})
+    hass.data.setdefault(DATA_LISTENERS, DmxListenerRegistry(schedule=hass.loop.call_soon))
     _register_services(hass)
     return True
 
 
+@callback
+def async_register_dmx_listener(
+    hass: HomeAssistant,
+    universes: Iterable[int],
+    on_dmx: OnListenerDmx,
+    on_lost: OnListenerLost | None = None,
+) -> CALLBACK_TYPE:
+    """Subscribe another integration to raw DMX on some universes.
+
+    `on_dmx(universe, dmx)` runs on the event loop with all 512 slots as a tuple
+    each time the data on a subscribed universe changes, and once with the
+    current frame of any live universe just after subscribing. `on_lost(universe)`
+    runs when that universe's stream stops or reception stops. Returns a function
+    that unsubscribes. The receiver joins subscribed universes alongside those of
+    inbound light mappings, and subscriptions survive the config entry reloading.
+
+    Integrations that would rather not import this module can call
+    `hass.data["sacn_control_listeners"].register(universes, on_dmx, on_lost)`,
+    which this wraps. Declare `"after_dependencies": ["sacn_control"]` so the
+    registry exists before your integration sets up.
+    """
+    hass.verify_event_loop_thread("sacn_control.async_register_dmx_listener")
+    registry: DmxListenerRegistry | None = hass.data.get(DATA_LISTENERS)
+    if registry is None:
+        raise HomeAssistantError("sACN Control is not set up")
+    return registry.register(universes, on_dmx, on_lost)
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up sACN Control from a config entry."""
-    bridge = SacnBridge(hass, entry)
+    bridge = SacnBridge(hass, entry, hass.data[DATA_LISTENERS])
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = bridge
     await bridge.async_start()
     await hass.config_entries.async_forward_entry_setups(

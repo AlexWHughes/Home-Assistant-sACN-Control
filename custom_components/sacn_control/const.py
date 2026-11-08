@@ -6,6 +6,8 @@ from enum import StrEnum
 from typing import Final
 
 DOMAIN: Final = "sacn_control"
+# hass.data key of the DmxListenerRegistry other integrations subscribe through.
+DATA_LISTENERS: Final = f"{DOMAIN}_listeners"
 MANUFACTURER: Final = "sACN Control"
 DEFAULT_NAME: Final = "sACN Control"
 
