@@ -388,6 +388,80 @@ def test_update_universes_pauses_the_receive_thread_before_mutating(
     assert sock.starts == 1  # same universe set does not pause or restart
 
 
+def _udp_receiver(monkeypatch: pytest.MonkeyPatch):
+    """Real sacn library with a real ReceiverSocketUDP on a free local port."""
+    sacn_lib = pytest.importorskip("sacn")
+    import sacn_control.receiver as receiver_module
+
+    libs: list = []
+    real_receiver = sacn_lib.sACNreceiver
+
+    def factory():
+        # Port 0 lets the OS pick a free UDP port so tests do not fight over 5568.
+        lib = real_receiver(bind_address="127.0.0.1", bind_port=0)
+        libs.append(lib)
+        return lib
+
+    monkeypatch.setattr(
+        receiver_module,
+        "sacn",
+        type("sacn", (), {"sACNreceiver": staticmethod(factory)}),
+    )
+    receiver = SacnReceiver(bind_ip="127.0.0.1", on_dmx=lambda *_: None)
+    return receiver, libs
+
+
+def test_real_udp_pauses_thread_before_mutating_listeners(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sacn.receiving.receiver_socket_udp import ReceiverSocketUDP
+
+    receiver, libs = _udp_receiver(monkeypatch)
+    try:
+        receiver.sync({1})
+        lib = libs[0]
+        sock = lib._handler.socket
+        assert isinstance(sock, ReceiverSocketUDP)
+        first_thread = sock._thread
+        assert first_thread is not None and first_thread.is_alive()
+
+        mutated_while_alive = False
+        original_remove = lib.remove_listener
+        original_register = lib.register_listener
+
+        def _thread_running() -> bool:
+            thread = getattr(sock, "_thread", None)
+            return thread is not None and thread.is_alive()
+
+        def _remove(func: object) -> None:
+            nonlocal mutated_while_alive
+            if _thread_running():
+                mutated_while_alive = True
+            original_remove(func)
+
+        def _register(trigger: str, func, **kwargs) -> None:
+            nonlocal mutated_while_alive
+            if _thread_running():
+                mutated_while_alive = True
+            original_register(trigger, func, **kwargs)
+
+        lib.remove_listener = _remove  # type: ignore[method-assign]
+        lib.register_listener = _register  # type: ignore[method-assign]
+
+        receiver.sync({2})
+        assert mutated_while_alive is False
+        assert 1 not in lib._callbacks
+        assert 2 in lib._callbacks
+        # Pause stops the old thread; resume starts a new one on the same socket.
+        assert sock._thread is not None and sock._thread.is_alive()
+        assert sock._thread is not first_thread
+
+        receiver.sync({2})
+        assert sock._thread.is_alive()  # unchanged set does not pause or restart
+    finally:
+        receiver.stop()
+
+
 def test_real_library_resubscribe_does_not_leak_callbacks(monkeypatch: pytest.MonkeyPatch) -> None:
     receiver, libs, _ = _real_receiver(monkeypatch)
     receiver.sync({1})
