@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
+from sacn_control.const import MAX_LISTENER_UNIVERSES
 from sacn_control.listeners import DmxListenerRegistry
 from sacn_control.receiver import SacnReceiver
 
@@ -97,19 +100,41 @@ def test_receiver_reports_stream_timeout_only_while_running() -> None:
 
 
 class _Packet:
-    def __init__(self, terminated: bool) -> None:
+    def __init__(self, terminated: bool, cid: tuple[int, ...] | None = None) -> None:
         self.dmxData = (1, 2, 3)
         self.option_StreamTerminated = terminated
+        self.cid = cid
 
 
 def test_receiver_ignores_data_in_stream_termination_packets() -> None:
-    got: list[int] = []
-    receiver = SacnReceiver(bind_ip=None, on_dmx=lambda universe, dmx, cid: got.append(universe))
+    got: list[str] = []
+    receiver = SacnReceiver(
+        bind_ip=None,
+        on_dmx=lambda universe, dmx, cid: got.append("dmx"),
+        on_terminated=lambda universe: got.append(f"terminated {universe}"),
+    )
     receiver._running = True
     receiver._handle_packet(1, _Packet(terminated=True))
-    assert got == []
+    assert got == ["terminated 1"]
     receiver._handle_packet(1, _Packet(terminated=False))
-    assert got == [1]
+    assert got == ["terminated 1", "dmx"]
+
+
+def test_receiver_ignores_self_cid_including_termination() -> None:
+    own = tuple(range(16))
+    got: list[str] = []
+    receiver = SacnReceiver(
+        bind_ip=None,
+        on_dmx=lambda universe, dmx, cid: got.append("dmx"),
+        ignore_cid=own,
+        on_terminated=lambda universe: got.append(f"terminated {universe}"),
+    )
+    receiver._running = True
+    receiver._handle_packet(1, _Packet(terminated=True, cid=own))
+    receiver._handle_packet(1, _Packet(terminated=False, cid=own))
+    assert got == []
+    receiver._handle_packet(1, _Packet(terminated=True, cid=tuple(range(16, 32))))
+    assert got == ["terminated 1"]
 
 
 class _FakeSacnLib:
@@ -118,6 +143,7 @@ class _FakeSacnLib:
     def __init__(self) -> None:
         self.callbacks: dict[int, list] = {}
         self.joined: set[int] = set()
+        self.join_log: list[int] = []
         self.availability = None
         self.running = False
 
@@ -137,6 +163,7 @@ class _FakeSacnLib:
 
     def join_multicast(self, universe: int) -> None:
         self.joined.add(universe)
+        self.join_log.append(universe)
 
     def leave_multicast(self, universe: int) -> None:
         self.joined.discard(universe)
@@ -234,11 +261,9 @@ def test_unsubscribed_during_dispatch_is_not_called() -> None:
     assert got == ["a"]
 
 
-sacn_lib = pytest.importorskip("sacn")
-
-
 def _real_receiver(monkeypatch: pytest.MonkeyPatch):
     """The wrapper around the real sacn library, on a socket that never opens."""
+    sacn_lib = pytest.importorskip("sacn")
     from sacn.receiving.receiver_socket_base import ReceiverSocketBase
 
     import sacn_control.receiver as receiver_module
@@ -264,11 +289,13 @@ def _real_receiver(monkeypatch: pytest.MonkeyPatch):
         bind_ip="127.0.0.1",
         on_dmx=lambda universe, dmx, cid: events.append(("dmx", universe, dmx[0])),
         on_lost=lambda universe: events.append(("lost", universe)),
+        on_terminated=lambda universe: events.append(("terminated", universe)),
     )
     return receiver, libs, events
 
 
 def _packet(seq: int, value: int, terminated: bool = False) -> bytes:
+    pytest.importorskip("sacn")
     from sacn.messages.data_packet import DataPacket
 
     return DataPacket(
@@ -288,9 +315,169 @@ def test_real_library_stream_resuming_with_the_same_data_is_delivered(
     handler.on_data(_packet(2, 10), 6.0)  # same look again
     assert events == [("dmx", 1, 10), ("lost", 1), ("dmx", 1, 10)]
     events.clear()
+    # Same DMX as the last frame: sacn would skip the universe listener without
+    # the termination hook, so only the availability timeout would fire.
     handler.on_data(_packet(3, 10, terminated=True), 7.0)
     handler.on_data(_packet(4, 10), 8.0)
-    assert events == [("lost", 1), ("dmx", 1, 10)]  # termination carries no data
+    assert events == [("lost", 1), ("terminated", 1), ("dmx", 1, 10)]
+
+
+def test_register_rejects_more_universes_than_the_join_cap() -> None:
+    with pytest.raises(ValueError, match="64"):
+        DmxListenerRegistry().register(range(1, MAX_LISTENER_UNIVERSES + 2), lambda *_: None)
+
+
+def test_register_rejects_when_the_union_would_exceed_the_cap() -> None:
+    registry = DmxListenerRegistry()
+    registry.register(range(1, MAX_LISTENER_UNIVERSES + 1), lambda *_: None)
+    with pytest.raises(ValueError, match="64"):
+        registry.register([MAX_LISTENER_UNIVERSES + 1], lambda *_: None)
+    assert registry.count == 1
+
+
+def test_register_and_unregister_require_the_configured_loop() -> None:
+    loop = asyncio.new_event_loop()
+    registry = DmxListenerRegistry(loop=loop)
+
+    async def subscribe() -> None:
+        unsub = registry.register([1], lambda *_: None)
+        assert registry.count == 1
+        # Still on this loop, so unsubscribe is allowed.
+        unsub()
+
+    loop.run_until_complete(subscribe())
+    assert registry.count == 0
+    with pytest.raises(RuntimeError, match="event loop"):
+        registry.register([1], lambda *_: None)
+    assert registry.count == 0
+    loop.close()
+
+
+def test_sync_joins_inbound_universes_before_the_rest(fake_sacn: list[_FakeSacnLib]) -> None:
+    receiver = SacnReceiver(bind_ip="127.0.0.1", on_dmx=lambda *_: None)
+    receiver.sync({1, 4, 9}, [4, 9, 1])
+    assert fake_sacn[0].join_log == [4, 9, 1]
+    receiver.sync({1, 4, 9, 2}, [4, 9, 1, 2])
+    assert fake_sacn[0].join_log == [4, 9, 1, 2]
+
+
+def test_update_universes_pauses_the_receive_thread_before_mutating(
+    fake_sacn: list[_FakeSacnLib],
+) -> None:
+    receiver = SacnReceiver(bind_ip="127.0.0.1", on_dmx=lambda *_: None)
+    receiver.sync({1})
+    lib = fake_sacn[0]
+
+    class _Socket:
+        def __init__(self) -> None:
+            self._enabled_flag = True
+            self._thread = self
+            self.alive = True
+            self.starts = 0
+            self.mutated_while_running = False
+
+        def is_alive(self) -> bool:
+            return self.alive
+
+        def join(self, timeout: float | None = None) -> None:
+            if not self._enabled_flag:
+                self.alive = False
+
+        def start(self) -> None:
+            self.starts += 1
+            self._enabled_flag = True
+            self.alive = True
+
+    sock = _Socket()
+    lib._handler = type("_Handler", (), {"socket": sock})()
+    original = lib.remove_listener
+
+    def _remove(func: object) -> None:
+        if sock.alive:
+            sock.mutated_while_running = True
+        original(func)
+
+    lib.remove_listener = _remove  # type: ignore[method-assign]
+    receiver.sync({2})
+    assert sock.mutated_while_running is False
+    assert sock.starts == 1
+    assert set(lib.callbacks) == {2}
+    receiver.sync({2})
+    assert sock.starts == 1  # same universe set does not pause or restart
+
+
+def _udp_receiver(monkeypatch: pytest.MonkeyPatch):
+    """Real sacn library with a real ReceiverSocketUDP on a free local port."""
+    sacn_lib = pytest.importorskip("sacn")
+    import sacn_control.receiver as receiver_module
+
+    libs: list = []
+    real_receiver = sacn_lib.sACNreceiver
+
+    def factory():
+        # Port 0 lets the OS pick a free UDP port so tests do not fight over 5568.
+        lib = real_receiver(bind_address="127.0.0.1", bind_port=0)
+        libs.append(lib)
+        return lib
+
+    monkeypatch.setattr(
+        receiver_module,
+        "sacn",
+        type("sacn", (), {"sACNreceiver": staticmethod(factory)}),
+    )
+    receiver = SacnReceiver(bind_ip="127.0.0.1", on_dmx=lambda *_: None)
+    return receiver, libs
+
+
+def test_real_udp_pauses_thread_before_mutating_listeners(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from sacn.receiving.receiver_socket_udp import ReceiverSocketUDP
+
+    receiver, libs = _udp_receiver(monkeypatch)
+    try:
+        receiver.sync({1})
+        lib = libs[0]
+        sock = lib._handler.socket
+        assert isinstance(sock, ReceiverSocketUDP)
+        first_thread = sock._thread
+        assert first_thread is not None and first_thread.is_alive()
+
+        mutated_while_alive = False
+        original_remove = lib.remove_listener
+        original_register = lib.register_listener
+
+        def _thread_running() -> bool:
+            thread = getattr(sock, "_thread", None)
+            return thread is not None and thread.is_alive()
+
+        def _remove(func: object) -> None:
+            nonlocal mutated_while_alive
+            if _thread_running():
+                mutated_while_alive = True
+            original_remove(func)
+
+        def _register(trigger: str, func, **kwargs) -> None:
+            nonlocal mutated_while_alive
+            if _thread_running():
+                mutated_while_alive = True
+            original_register(trigger, func, **kwargs)
+
+        lib.remove_listener = _remove  # type: ignore[method-assign]
+        lib.register_listener = _register  # type: ignore[method-assign]
+
+        receiver.sync({2})
+        assert mutated_while_alive is False
+        assert 1 not in lib._callbacks
+        assert 2 in lib._callbacks
+        # Pause stops the old thread; resume starts a new one on the same socket.
+        assert sock._thread is not None and sock._thread.is_alive()
+        assert sock._thread is not first_thread
+
+        receiver.sync({2})
+        assert sock._thread.is_alive()  # unchanged set does not pause or restart
+    finally:
+        receiver.stop()
 
 
 def test_real_library_resubscribe_does_not_leak_callbacks(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -55,7 +55,10 @@ CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 async def async_setup(hass: HomeAssistant, _config: ConfigType) -> bool:
     """Set up the integration domain and register services."""
     hass.data.setdefault(DOMAIN, {})
-    hass.data.setdefault(DATA_LISTENERS, DmxListenerRegistry(schedule=hass.loop.call_soon))
+    hass.data.setdefault(
+        DATA_LISTENERS,
+        DmxListenerRegistry(schedule=hass.loop.call_soon, loop=hass.loop),
+    )
     _register_services(hass)
     return True
 
@@ -69,17 +72,17 @@ def async_register_dmx_listener(
 ) -> CALLBACK_TYPE:
     """Subscribe another integration to raw DMX on some universes.
 
-    `on_dmx(universe, dmx)` runs on the event loop with all 512 slots as a tuple
-    each time the data on a subscribed universe changes, and once with the
-    current frame of any live universe just after subscribing. `on_lost(universe)`
+    `on_dmx(universe, dmx)` runs on the event loop with all 512 slots as a tuple.
+    Frames are the latest data for that universe, at most 40 times a second, and
+    a new subscriber also gets the current frame of any live universe. `on_lost`
     runs when that universe's stream stops or reception stops. Returns a function
-    that unsubscribes. The receiver joins subscribed universes alongside those of
-    inbound light mappings, and subscriptions survive the config entry reloading.
+    that unsubscribes. The receiver joins subscribed universes alongside inbound
+    light mappings (inbound mappings first), and subscriptions survive the config
+    entry reloading. At most 64 listener universes can be joined.
 
-    Integrations that would rather not import this module can call
-    `hass.data["sacn_control_listeners"].register(universes, on_dmx, on_lost)`,
-    which this wraps. Declare `"after_dependencies": ["sacn_control"]` so the
-    registry exists before your integration sets up.
+    Call this from the event loop. `hass.data["sacn_control_listeners"].register`
+    is the same subscription and checks the loop too. Declare
+    `"after_dependencies": ["sacn_control"]` so the registry exists first.
     """
     hass.verify_event_loop_thread("sacn_control.async_register_dmx_listener")
     registry: DmxListenerRegistry | None = hass.data.get(DATA_LISTENERS)
@@ -112,10 +115,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def _async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Reload the config entry after options change."""
     await hass.config_entries.async_reload(entry.entry_id)
 
 
 def _bridge(hass: HomeAssistant) -> SacnBridge | None:
+    """Return the single loaded bridge, if any."""
     entries = hass.data.get(DOMAIN) or {}
     if not entries:
         return None
@@ -123,10 +128,12 @@ def _bridge(hass: HomeAssistant) -> SacnBridge | None:
 
 
 def _register_services(hass: HomeAssistant) -> None:
+    """Register mapping services once per Home Assistant process."""
     if hass.services.has_service(DOMAIN, "add_inbound"):
         return
 
     async def handle_add_inbound(call: ServiceCall) -> None:
+        """Add or replace an inbound light mapping from a service call."""
         bridge = _bridge(hass)
         if bridge is None:
             return
@@ -137,6 +144,7 @@ def _register_services(hass: HomeAssistant) -> None:
         _update_options(hass, bridge, inbound=inbound)
 
     async def handle_add_outbound(call: ServiceCall) -> None:
+        """Add or replace an outbound fixture mapping from a service call."""
         bridge = _bridge(hass)
         if bridge is None:
             return
@@ -147,6 +155,7 @@ def _register_services(hass: HomeAssistant) -> None:
         _update_options(hass, bridge, outbound=outbound)
 
     async def handle_remove_map(call: ServiceCall) -> None:
+        """Remove an inbound or outbound mapping by id token."""
         bridge = _bridge(hass)
         if bridge is None:
             return
@@ -217,6 +226,7 @@ def _update_options(
     inbound: list[InboundMap] | None = None,
     outbound: list[OutboundMap] | None = None,
 ) -> None:
+    """Persist mapping option changes onto the config entry."""
     current = dict(bridge.entry.options)
     if inbound is not None:
         current[CONF_INBOUND_MAPS] = [item.to_dict() for item in inbound]

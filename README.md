@@ -1,6 +1,6 @@
 # sACN Control
 
-A Home Assistant custom integration (HACS) that bridges **sACN / E1.31** both ways:
+A Home Assistant custom integration (Marketplace) that bridges **sACN / E1.31** both ways:
 
 - **sACN → Home Assistant** — a lighting console or media server drives existing `light.*` entities
 - **Home Assistant → sACN** — Home Assistant lights transmit DMX to sACN fixtures, nodes, and LED processors
@@ -9,15 +9,17 @@ This is the in-process sister of [sACN2HomeLX](https://github.com/AlexWHughes/sA
 
 Channel personalities match sACN2HomeLX whole-fixture modes (RGB / RGBW / HSBK, 8-bit and 16-bit). One outbound fixture can cover a strip or bar (up to 170 RGB pixels, clamped to the remaining channels on that universe). 2D matrix layouts stay in sACN2HomeLX.
 
-## Install with HACS
+## Install with Marketplace
 
-1. HACS → **⋯** → **Custom repositories**
-2. Add [`https://github.com/AlexWHughes/Home-Assistant-sACN-Control`](https://github.com/AlexWHughes/Home-Assistant-sACN-Control) as category **Integration**
-3. Search for **sACN Control** and install
-4. Restart Home Assistant
+Home Assistant 2026.11+ includes the Marketplace (formerly HACS) under **Settings → Marketplace**.
+
+1. **Settings → Marketplace** → **Add from link**
+2. Paste [`https://github.com/AlexWHughes/Home-Assistant-sACN-Control`](https://github.com/AlexWHughes/Home-Assistant-sACN-Control) (or `AlexWHughes/Home-Assistant-sACN-Control`) and select **Add**
+3. Open **sACN Control** and select **Install**
+4. Restart Home Assistant if prompted
 5. **Settings → Devices & services → Add integration → sACN Control**
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=AlexWHughes&repository=Home-Assistant-sACN-Control&category=integration)
+[![Open your Home Assistant instance and open a repository inside the Marketplace.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=AlexWHughes&repository=Home-Assistant-sACN-Control&category=integration)
 
 Manual install: copy `custom_components/sacn_control` into your Home Assistant `config/custom_components/` folder, restart, then add the integration from the UI.
 
@@ -133,7 +135,7 @@ async def async_setup_entry(hass: HomeAssistant, entry) -> bool:
 
         @callback
         def on_dmx(universe: int, dmx: tuple[int, ...]) -> None:
-            ...  # all 512 slots, each time the data on the universe changes
+            ...  # all 512 slots, latest frame, at most 40 times a second
 
         @callback
         def on_lost(universe: int) -> None:
@@ -143,14 +145,13 @@ async def async_setup_entry(hass: HomeAssistant, entry) -> bool:
     return True
 ```
 
-Add `"after_dependencies": ["sacn_control"]` to your manifest so the registry exists before your integration sets up. `custom_components.sacn_control.async_register_dmx_listener(hass, universes, on_dmx, on_lost)` does the same if you would rather import it.
+Add `"after_dependencies": ["sacn_control"]` to your manifest so the registry exists before your integration sets up. `custom_components.sacn_control.async_register_dmx_listener(hass, universes, on_dmx, on_lost)` does the same if you would rather import it. Register from the event loop. Both paths check that, because a subscription change starts a Home Assistant task.
 
-- Callbacks run on the event loop. `on_dmx` gets each changed frame as it arrives, not at the inbound update rate, and a new subscriber gets the current frame of any live universe straight away, so a static scene is not missed. Frames are tuples, shared between listeners.
-- The receiver joins subscribed universes as well as those used by inbound light mappings, starts when either needs it, and changes subscriptions without reopening its socket.
-- Priority and sequence checks happen in the receiver: data comes from the highest-priority source, and sources at equal priority interleave. Any source terminating its stream on a universe, including a lower-priority backup, ends it for a moment: listeners get `on_lost`, then data again with the next packet from a source still sending.
+- Callbacks run on the event loop. `on_dmx` gets the latest frame for each subscribed universe, at most 40 times a second, so a 40 fps pixel sender is kept and a flooded universe cannot queue one callback per packet. A new subscriber gets the current frame of any live universe straight away, so a static scene is not missed. Frames are tuples, shared between listeners.
+- At most 64 listener universes can be joined. The receiver also joins universes used by inbound light mappings, inbound mappings first, starts when either needs it, and changes subscriptions without reopening its socket. Linux often allows only 20 multicast groups per socket until `igmp_max_memberships` is raised. Joins past that limit are logged and skipped.
+- Priority and sequence checks happen in the receiver: data comes from the highest-priority source, and sources at equal priority interleave. Any source terminating its stream on a universe, including a lower-priority backup, ends it for a moment: listeners get `on_lost`, then data again with the next packet from a source still sending. A termination packet's own DMX is ignored, and inbound lights mapped to that universe are turned off. A data-loss timeout holds the last inbound look.
 - Subscriptions survive the config entry reloading when mappings change, but each reload stops reception briefly, so listeners get `on_lost` and then the next frame.
 - The **Receive** switch applies: switching it off stops delivery and calls `on_lost` for every subscribed universe.
-- Register from the event loop; `async_register_dmx_listener` checks this.
 
 ## How this differs from other options
 
