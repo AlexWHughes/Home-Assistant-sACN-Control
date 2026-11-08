@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 import logging
 from typing import Any
 
-from .const import UNIVERSE_MAX, UNIVERSE_MIN
+from .const import MAX_LISTENER_UNIVERSES, UNIVERSE_MAX, UNIVERSE_MIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -38,12 +39,17 @@ class DmxListenerRegistry:
     back into its caller; Home Assistant passes `loop.call_soon`.
     """
 
-    def __init__(self, schedule: Callable[..., Any] | None = None) -> None:
+    def __init__(
+        self,
+        schedule: Callable[..., Any] | None = None,
+        loop: asyncio.AbstractEventLoop | None = None,
+    ) -> None:
         self._listeners: list[_Listener] = []
         self._universes: frozenset[int] = frozenset()
         self._on_change: Callable[[], None] | None = None
         self._frame_source: FrameSource | None = None
         self._schedule = schedule if schedule is not None else lambda fn, *args: fn(*args)
+        self._loop = loop
 
     def register(
         self,
@@ -53,18 +59,24 @@ class DmxListenerRegistry:
     ) -> Callable[[], None]:
         """Subscribe to universes and return a function that unsubscribes.
 
-        `on_dmx(universe, dmx)` gets all 512 slots as a tuple whenever the data
-        on that universe changes, and the current frame of any live universe
-        shortly after subscribing. `on_lost(universe)` is called when the
+        `on_dmx(universe, dmx)` gets all 512 slots as a tuple. The bridge delivers
+        the latest frame, at most 40 times a second, and the current frame of any
+        live universe shortly after subscribing. `on_lost(universe)` is called when the
         universe's stream stops (E1.31 data loss timeout or stream termination)
         or reception stops (switched off, or the config entry unloading).
+        Call this from the Home Assistant event loop.
         """
+        self._require_event_loop()
         wanted = frozenset(int(universe) for universe in universes)
         if not wanted:
             raise ValueError("At least one universe is required")
         bad = sorted(u for u in wanted if not UNIVERSE_MIN <= u <= UNIVERSE_MAX)
         if bad:
             raise ValueError(f"Universes out of range {UNIVERSE_MIN}-{UNIVERSE_MAX}: {bad}")
+        if len(wanted) > MAX_LISTENER_UNIVERSES or len(self._universes | wanted) > MAX_LISTENER_UNIVERSES:
+            raise ValueError(
+                f"At most {MAX_LISTENER_UNIVERSES} universes can be subscribed at once"
+            )
         listener = _Listener(wanted, on_dmx, on_lost)
         self._listeners.append(listener)
         self._refresh()
@@ -72,11 +84,32 @@ class DmxListenerRegistry:
             self._schedule(self._replay, listener)
 
         def unregister() -> None:
+            self._require_event_loop()
             if listener in self._listeners:
                 self._listeners.remove(listener)
                 self._refresh()
 
         return unregister
+
+    def _require_event_loop(self) -> None:
+        """Reject register and unregister off the loop that owns the bridge.
+
+        `hass.data` callers do not go through `async_register_dmx_listener`.
+        A subscription change starts a background task, which Home Assistant
+        only allows on the event loop.
+        """
+        if self._loop is None:
+            return
+        try:
+            running = asyncio.get_running_loop()
+        except RuntimeError as err:
+            raise RuntimeError(
+                "sacn_control DMX listeners must be registered from the Home Assistant event loop"
+            ) from err
+        if running is not self._loop:
+            raise RuntimeError(
+                "sacn_control DMX listeners must be registered from the Home Assistant event loop"
+            )
 
     def set_change_callback(self, callback: Callable[[], None] | None) -> None:
         """Called whenever the set of subscribed universes changes."""

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
+from functools import partial
 import logging
+import threading
 import time
 from typing import Any
 
@@ -39,6 +41,7 @@ from .const import (
     DEFAULT_SOURCE_NAME,
     DEFAULT_TRANSITION,
     DEFAULT_WHITE_BLEND,
+    LISTENER_MAX_HZ,
     RGB_CAPABLE_HA_MODES,
 )
 from .dmx import ColorCommand, decode, encode, values_changed
@@ -83,14 +86,22 @@ class SacnBridge:
             on_dmx=self._on_dmx,
             ignore_cid=self.sender.cid,
             on_lost=self._on_lost,
+            on_terminated=self._on_stream_terminated,
         )
         self.inbound: list[InboundMap] = []
         self.outbound: list[OutboundMap] = []
         self._latest_dmx: dict[int, list[int]] = {}
-        # Universes with a stream right now; written by the receiver thread.
+        # Universes with a stream right now. Guarded by _state_lock.
         self._live: set[int] = set()
         self._last_applied: dict[str, list[int]] = {}
         self._inbound_dirty = False
+        self._inbound_epoch: dict[int, int] = {}
+        self._listener_pending: dict[int, tuple[int, ...]] = {}
+        self._listener_flush_scheduled = False
+        self._listener_timer: asyncio.TimerHandle | None = None
+        self._next_listener_flush = 0.0
+        self._state_lock = threading.Lock()
+        self._inbound_lock = asyncio.Lock()
         # Serialises receiver changes, which run in the executor, so they apply
         # in order and none can restart the receiver after async_stop.
         self._receiver_lock = asyncio.Lock()
@@ -159,6 +170,17 @@ class SacnBridge:
         """Universes the receiver joins: inbound mappings plus DMX listeners."""
         return self.inbound_universes() | self.listeners.universes
 
+    def _receive_join_order(self, universes: set[int]) -> list[int]:
+        """Join inbound mappings before listener-only universes.
+
+        A full multicast table drops later joins. Keeping configured inbound
+        universes first means a listener cannot take their memberships.
+        """
+        inbound = self.inbound_universes()
+        return sorted(universe for universe in universes if universe in inbound) + sorted(
+            universe for universe in universes if universe not in inbound
+        )
+
     def outbound_universes(self) -> set[int]:
         """Universes that outbound fixtures transmit on."""
         return {item.universe for item in self.outbound}
@@ -188,7 +210,11 @@ class SacnBridge:
         async with self._receiver_lock:
             self._stopped = True
             await self.hass.async_add_executor_job(self._stop_sockets)
-        self._live.clear()
+        with self._state_lock:
+            self._live.clear()
+            self._listener_pending.clear()
+            self._listener_flush_scheduled = False
+        self._cancel_listener_flush()
         self.listeners.lost_all()
 
     def _start_sender(self) -> None:
@@ -208,7 +234,11 @@ class SacnBridge:
         )
         await self._async_sync_receiver()
         if not enabled:
-            self._live.clear()
+            with self._state_lock:
+                self._live.clear()
+                self._listener_pending.clear()
+                self._listener_flush_scheduled = False
+            self._cancel_listener_flush()
             self.listeners.lost_all()
 
     async def async_set_send(self, enabled: bool) -> None:
@@ -226,7 +256,8 @@ class SacnBridge:
                 return
             # Read on the loop, under the lock, so the latest wanted set wins.
             universes = self.receive_universes() if self.receive_enabled else set()
-            await self.hass.async_add_executor_job(self.receiver.sync, universes)
+            order = self._receive_join_order(universes)
+            await self.hass.async_add_executor_job(partial(self.receiver.sync, universes, order))
 
     @callback
     def _on_listener_universes_changed(self) -> None:
@@ -247,37 +278,140 @@ class SacnBridge:
         dmx: list[int],
         _cid: tuple[int, ...] | None,
     ) -> None:
-        self._latest_dmx[universe] = dmx
-        self._live.add(universe)
-        self._inbound_dirty = True
-        if self.listeners.has_universe(universe):
-            # Receiver thread: hand each frame to the event loop as it arrives,
-            # not at the inbound tick rate.
-            self.hass.loop.call_soon_threadsafe(self._deliver_dmx, universe, tuple(dmx))
-
-    @callback
-    def _deliver_dmx(self, universe: int, dmx: tuple[int, ...]) -> None:
-        # A frame queued just before the receiver stopped would otherwise reach
-        # listeners after lost_all() told them the stream had ended.
-        if self.receiver.running:
-            self.listeners.dispatch(universe, dmx)
+        schedule = False
+        with self._state_lock:
+            self._latest_dmx[universe] = dmx
+            self._live.add(universe)
+            self._inbound_dirty = True
+            self._inbound_epoch[universe] = self._inbound_epoch.get(universe, 0) + 1
+            if self.listeners.has_universe(universe):
+                # Keep the latest frame only. One loop callback drains every
+                # dirty universe, and never faster than LISTENER_MAX_HZ.
+                self._listener_pending[universe] = tuple(dmx)
+                if not self._listener_flush_scheduled:
+                    self._listener_flush_scheduled = True
+                    schedule = True
+        if schedule:
+            self.hass.loop.call_soon_threadsafe(self._arm_listener_flush)
 
     def _current_frame(self, universe: int) -> list[int] | None:
         """Latest frame of a live universe, for replay to a new listener."""
-        if not self.receiver.running or universe not in self._live:
+        if not self.receiver.running:
             return None
-        return self._latest_dmx.get(universe)
+        with self._state_lock:
+            if universe not in self._live:
+                return None
+            frame = self._latest_dmx.get(universe)
+            return list(frame) if frame is not None else None
 
     def _on_lost(self, universe: int) -> None:
-        # Receiver thread.
-        self._live.discard(universe)
+        """Data-loss timeout. Inbound lights hold their last look."""
+        with self._state_lock:
+            self._live.discard(universe)
+            self._listener_pending.pop(universe, None)
         if self.listeners.has_universe(universe):
-            self.hass.loop.call_soon_threadsafe(self.listeners.lost, universe)
+            self.hass.loop.call_soon_threadsafe(self._notify_listener_lost, universe)
+
+    def _on_stream_terminated(self, universe: int) -> None:
+        """Stream_Terminated packet. Release inbound lights; ignore its DMX."""
+        with self._state_lock:
+            self._live.discard(universe)
+            self._listener_pending.pop(universe, None)
+            self._latest_dmx.pop(universe, None)
+            self._inbound_epoch[universe] = self._inbound_epoch.get(universe, 0) + 1
+            epoch = self._inbound_epoch[universe]
+        self.hass.loop.call_soon_threadsafe(self._release_inbound_universe, universe, epoch)
+
+    @callback
+    def _notify_listener_lost(self, universe: int) -> None:
+        if self._stopped:
+            return
+        with self._state_lock:
+            # A packet resumed the universe before this callback ran.
+            if universe in self._live:
+                return
+        self.listeners.lost(universe)
+
+    @callback
+    def _release_inbound_universe(self, universe: int, epoch: int) -> None:
+        if self._stopped:
+            return
+        self.entry.async_create_background_task(
+            self.hass,
+            self._async_release_inbound_universe(universe, epoch),
+            f"sacn_control release universe {universe}",
+        )
+
+    async def _async_release_inbound_universe(self, universe: int, epoch: int) -> None:
+        mappings = [mapping for mapping in self.inbound if mapping.universe == universe]
+        async with self._inbound_lock:
+            with self._state_lock:
+                if self._inbound_epoch.get(universe, 0) != epoch:
+                    return
+                for mapping in mappings:
+                    self._last_applied.pop(mapping.map_id, None)
+            for mapping in mappings:
+                with self._state_lock:
+                    if self._inbound_epoch.get(universe, 0) != epoch:
+                        return
+                await self._async_turn_off_entity(mapping.entity_id)
+
+    @callback
+    def _arm_listener_flush(self) -> None:
+        if self._stopped or not self.receiver.running:
+            with self._state_lock:
+                self._listener_pending.clear()
+                self._listener_flush_scheduled = False
+            return
+        delay = max(0.0, self._next_listener_flush - time.monotonic())
+        if delay <= 0:
+            self._cancel_listener_flush()
+            self._flush_listeners()
+            return
+        self._cancel_listener_flush()
+        self._listener_timer = self.hass.loop.call_later(delay, self._flush_listeners)
+
+    @callback
+    def _flush_listeners(self) -> None:
+        self._listener_timer = None
+        self._next_listener_flush = time.monotonic() + (1.0 / LISTENER_MAX_HZ)
+        with self._state_lock:
+            if self._stopped or not self.receiver.running:
+                self._listener_pending.clear()
+                self._listener_flush_scheduled = False
+                return
+            pending = self._listener_pending
+            self._listener_pending = {}
+            live = set(self._live)
+            self._listener_flush_scheduled = False
+        for universe, frame in pending.items():
+            if universe in live:
+                self.listeners.dispatch(universe, frame)
+        self._arm_listener_flush_if_pending()
+
+    def _arm_listener_flush_if_pending(self) -> None:
+        with self._state_lock:
+            if not self._listener_pending or self._listener_flush_scheduled:
+                return
+            self._listener_flush_scheduled = True
+        self._arm_listener_flush()
+
+    def _cancel_listener_flush(self) -> None:
+        if self._listener_timer is not None:
+            self._listener_timer.cancel()
+            self._listener_timer = None
 
     async def _async_tick(self, _now: Any = None) -> None:
-        if self.receive_enabled and self._inbound_dirty:
-            self._inbound_dirty = False
-            await self._async_apply_inbound()
+        snapshot: dict[int, tuple[list[int], int]] | None = None
+        with self._state_lock:
+            if self.receive_enabled and self._inbound_dirty:
+                self._inbound_dirty = False
+                snapshot = {
+                    universe: (list(frame), self._inbound_epoch.get(universe, 0))
+                    for universe, frame in self._latest_dmx.items()
+                }
+        if snapshot is not None:
+            await self._async_apply_inbound(snapshot)
         if self.send_enabled:
             dirty = self.store.take_dirty()
             if dirty:
@@ -291,11 +425,12 @@ class SacnBridge:
         for universe in universes:
             self.sender.update_universe(universe, self.store)
 
-    async def _async_apply_inbound(self) -> None:
+    async def _async_apply_inbound(self, snapshot: dict[int, tuple[list[int], int]]) -> None:
         for mapping in self.inbound:
-            dmx = self._latest_dmx.get(mapping.universe)
-            if dmx is None:
+            item = snapshot.get(mapping.universe)
+            if item is None:
                 continue
+            dmx, epoch = item
             start = mapping.start_channel - 1
             end = start + mapping.channel_count
             if start < 0 or end > len(dmx):
@@ -314,19 +449,28 @@ class SacnBridge:
             except ValueError:
                 _LOGGER.debug("Skipping inbound map %s: short DMX frame", mapping.map_id)
                 continue
-            self._last_applied[mapping.map_id] = list(values)
-            await self._async_push_ha_light(mapping, command)
+            async with self._inbound_lock:
+                with self._state_lock:
+                    if self._inbound_epoch.get(mapping.universe, 0) != epoch:
+                        continue
+                    self._last_applied[mapping.map_id] = list(values)
+                await self._async_push_ha_light(mapping, command)
+
+    async def _async_turn_off_entity(self, entity_id: str) -> None:
+        if not self.hass.states.get(entity_id):
+            return
+        await self.hass.services.async_call(
+            LIGHT_DOMAIN,
+            SERVICE_TURN_OFF,
+            {ATTR_ENTITY_ID: entity_id, "transition": self.transition},
+            blocking=False,
+        )
 
     async def _async_push_ha_light(self, mapping: InboundMap, command: ColorCommand) -> None:
         if not self.hass.states.get(mapping.entity_id):
             return
         if command.is_black:
-            await self.hass.services.async_call(
-                LIGHT_DOMAIN,
-                SERVICE_TURN_OFF,
-                {ATTR_ENTITY_ID: mapping.entity_id, "transition": self.transition},
-                blocking=False,
-            )
+            await self._async_turn_off_entity(mapping.entity_id)
             return
         await self.hass.services.async_call(
             LIGHT_DOMAIN,
