@@ -19,6 +19,8 @@ FrameSource = Callable[[int], Sequence[int] | None]
 
 @dataclass(frozen=True, slots=True, eq=False)
 class _Listener:
+    """One subscriber and the universes it asked for."""
+
     universes: frozenset[int]
     on_dmx: OnListenerDmx
     on_lost: OnListenerLost | None
@@ -44,6 +46,7 @@ class DmxListenerRegistry:
         schedule: Callable[..., Any] | None = None,
         loop: asyncio.AbstractEventLoop | None = None,
     ) -> None:
+        """Create an empty registry; `loop` enables event-loop ownership checks."""
         self._listeners: list[_Listener] = []
         self._universes: frozenset[int] = frozenset()
         self._on_change: Callable[[], None] | None = None
@@ -84,6 +87,7 @@ class DmxListenerRegistry:
             self._schedule(self._replay, listener)
 
         def unregister() -> None:
+            """Remove this subscription and refresh the universe set."""
             self._require_event_loop()
             if listener in self._listeners:
                 self._listeners.remove(listener)
@@ -163,6 +167,7 @@ class DmxListenerRegistry:
             self.lost(universe)
 
     def _replay(self, listener: _Listener) -> None:
+        """Send each live universe's current frame to a newly registered listener."""
         for universe in sorted(listener.universes):
             source = self._frame_source
             frame = source(universe) if source is not None else None
@@ -174,6 +179,7 @@ class DmxListenerRegistry:
                 _LOGGER.exception("sACN DMX listener failed on universe %s", universe)
 
     def _refresh(self) -> None:
+        """Recompute the subscribed universe set and notify the bridge if it changed."""
         universes = frozenset().union(*(listener.universes for listener in self._listeners))
         if universes == self._universes:
             return

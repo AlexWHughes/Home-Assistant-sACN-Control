@@ -98,6 +98,7 @@ class SacnReceiver:
             self._receiver = sacn.sACNreceiver()
             self._handlers = {}
             self._apply_multicast_interface()
+            self._install_termination_hook()
             self._receiver.register_listener("availability", self._handle_availability)
             self._receiver.start()
             for universe in _join_sequence(self._universes, join_order):
@@ -167,7 +168,30 @@ class SacnReceiver:
                 _LOGGER.debug("Error stopping sACN receiver", exc_info=True)
 
     def _receive_socket(self) -> Any:
+        """UDP socket used by the sacn receive thread, if the library exposed it."""
         return getattr(getattr(self._receiver, "_handler", None), "socket", None)
+
+    def _install_termination_hook(self) -> None:
+        """Invoke termination handling before sacn filters unchanged DMX.
+
+        `fire_callbacks_universe` only notifies universe listeners when
+        `dmxData` differs from the previous frame. A Stream_Terminated packet
+        often repeats that frame, so the library would fire the availability
+        timeout alone and never reach `_handle_packet`. Data-loss timeouts
+        still come only from the availability listener.
+        """
+        handler = getattr(self._receiver, "_handler", None)
+        original = getattr(handler, "fire_callbacks_universe", None)
+        if handler is None or not callable(original):
+            return
+
+        def fire_callbacks_universe(packet: Any) -> None:
+            if getattr(packet, "option_StreamTerminated", False):
+                self._handle_packet(packet.universe, packet)
+                return
+            original(packet)
+
+        handler.fire_callbacks_universe = fire_callbacks_universe
 
     def _pause_receive_loop(self) -> str:
         """Stop the receive thread without closing the socket.
@@ -201,6 +225,7 @@ class SacnReceiver:
         return "paused"
 
     def _resume_receive_loop(self) -> None:
+        """Restart the receive thread after a successful pause."""
         sock = self._receive_socket()
         if sock is None or not hasattr(sock, "start"):
             return
@@ -210,12 +235,14 @@ class SacnReceiver:
         sock.start()
 
     def _membership_ips(self) -> list[str]:
+        """Interfaces used for IGMP joins: the bind IP, or every non-loopback."""
         if self._bind_ip:
             return [self._bind_ip]
         addresses = local_ipv4_addresses()
         return addresses or ["0.0.0.0"]
 
     def _apply_multicast_interface(self) -> None:
+        """Point the library socket at the preferred membership interface."""
         sock_impl = getattr(getattr(self._receiver, "_handler", None), "socket", None)
         if sock_impl is None:
             return
@@ -225,6 +252,7 @@ class SacnReceiver:
             _LOGGER.debug("sACN receiver is missing multicast socket internals")
 
     def _register(self, universe: int) -> None:
+        """Subscribe to one universe and join its multicast group."""
         def handle_dmx(packet: Any) -> None:
             self._handle_packet(universe, packet)
 
@@ -233,6 +261,7 @@ class SacnReceiver:
         self._join_multicast(universe)
 
     def _unregister(self, universe: int) -> None:
+        """Drop universe listeners and leave its multicast group."""
         handler = self._handlers.pop(universe, None)
         if handler is not None:
             # register_listener also files the handler under the trigger name,
@@ -260,6 +289,7 @@ class SacnReceiver:
                 pass
 
     def _join_multicast(self, universe: int) -> None:
+        """Join the E1.31 multicast group on every membership interface."""
         ips = self._membership_ips()
         sock_impl = getattr(getattr(self._receiver, "_handler", None), "socket", None)
         if sock_impl is not None:
@@ -312,6 +342,7 @@ class SacnReceiver:
             _LOGGER.exception("Error delivering sACN stream loss for universe %s", universe)
 
     def _handle_packet(self, universe: int, packet: Any) -> None:
+        """Deliver DMX, or termination, from one accepted universe packet."""
         if not self._running:
             return
         if getattr(packet, "option_StreamTerminated", False):
@@ -355,6 +386,7 @@ def _join_sequence(universes: set[int], join_order: Sequence[int] | None) -> lis
 
 
 def _packet_cid(packet: Any) -> tuple[int, ...] | None:
+    """Normalise a packet CID to a comparable tuple of ints."""
     cid = getattr(packet, "cid", None)
     if cid is None:
         return None
@@ -366,6 +398,7 @@ def _packet_cid(packet: Any) -> tuple[int, ...] | None:
 
 
 def _extract_dmx(packet: Any) -> list[int] | None:
+    """Read 512 clamped channel values from a sacn packet or raw sequence."""
     if hasattr(packet, "dmxData"):
         data = packet.dmxData
     elif hasattr(packet, "dmx_data"):

@@ -72,6 +72,7 @@ class SacnBridge:
         entry: ConfigEntry,
         listeners: DmxListenerRegistry,
     ) -> None:
+        """Wire sockets, mappings, and the shared DMX listener registry."""
         self.hass = hass
         self.entry = entry
         self.listeners = listeners
@@ -218,11 +219,13 @@ class SacnBridge:
         self.listeners.lost_all()
 
     def _start_sender(self) -> None:
+        """Start outbound transmission when send is enabled and fixtures exist."""
         if self.send_enabled and self.outbound:
             self.sender.start()
             self.sender.sync_universes(self.outbound_universes(), self.store)
 
     def _stop_sockets(self) -> None:
+        """Stop both the receiver and the sender."""
         self.receiver.stop()
         self.sender.stop()
 
@@ -261,11 +264,13 @@ class SacnBridge:
 
     @callback
     def _on_listener_universes_changed(self) -> None:
+        """Resubscribe the receiver when another integration adds or drops universes."""
         self.entry.async_create_background_task(
             self.hass, self._async_sync_receiver(), "sacn_control receiver resubscribe"
         )
 
     def _apply_send_state(self, enabled: bool) -> None:
+        """Start or stop the sender to match the Send switch."""
         if enabled and self.outbound:
             self.sender.start()
             self.sender.sync_universes(self.outbound_universes(), self.store)
@@ -278,6 +283,7 @@ class SacnBridge:
         dmx: list[int],
         _cid: tuple[int, ...] | None,
     ) -> None:
+        """Cache a received frame and schedule inbound and listener delivery."""
         schedule = False
         with self._state_lock:
             self._latest_dmx[universe] = dmx
@@ -324,6 +330,7 @@ class SacnBridge:
 
     @callback
     def _notify_listener_lost(self, universe: int) -> None:
+        """Tell listeners a universe stopped, unless a newer packet already revived it."""
         if self._stopped:
             return
         with self._state_lock:
@@ -334,6 +341,7 @@ class SacnBridge:
 
     @callback
     def _release_inbound_universe(self, universe: int, epoch: int) -> None:
+        """Schedule turning off inbound lights for a terminated universe."""
         if self._stopped:
             return
         self.entry.async_create_background_task(
@@ -343,6 +351,7 @@ class SacnBridge:
         )
 
     async def _async_release_inbound_universe(self, universe: int, epoch: int) -> None:
+        """Turn off inbound-mapped lights if no newer stream event superseded `epoch`."""
         mappings = [mapping for mapping in self.inbound if mapping.universe == universe]
         async with self._inbound_lock:
             with self._state_lock:
@@ -358,6 +367,7 @@ class SacnBridge:
 
     @callback
     def _arm_listener_flush(self) -> None:
+        """Flush now, or after the rate-limit delay, if listeners still need frames."""
         if self._stopped or not self.receiver.running:
             with self._state_lock:
                 self._listener_pending.clear()
@@ -373,6 +383,7 @@ class SacnBridge:
 
     @callback
     def _flush_listeners(self) -> None:
+        """Deliver coalesced frames to listeners, then re-arm if more arrived."""
         self._listener_timer = None
         self._next_listener_flush = time.monotonic() + (1.0 / LISTENER_MAX_HZ)
         with self._state_lock:
@@ -390,6 +401,7 @@ class SacnBridge:
         self._arm_listener_flush_if_pending()
 
     def _arm_listener_flush_if_pending(self) -> None:
+        """Schedule another flush when frames arrived during the last one."""
         with self._state_lock:
             if not self._listener_pending or self._listener_flush_scheduled:
                 return
@@ -397,11 +409,13 @@ class SacnBridge:
         self._arm_listener_flush()
 
     def _cancel_listener_flush(self) -> None:
+        """Cancel a pending listener rate-limit timer."""
         if self._listener_timer is not None:
             self._listener_timer.cancel()
             self._listener_timer = None
 
     async def _async_tick(self, _now: Any = None) -> None:
+        """Periodic inbound apply, outbound push, and sensor refresh."""
         snapshot: dict[int, tuple[list[int], int]] | None = None
         with self._state_lock:
             if self.receive_enabled and self._inbound_dirty:
@@ -422,10 +436,12 @@ class SacnBridge:
             await self.coordinator.async_request_refresh()
 
     def _push_dirty(self, universes: list[int]) -> None:
+        """Transmit each dirty outbound universe from the store."""
         for universe in universes:
             self.sender.update_universe(universe, self.store)
 
     async def _async_apply_inbound(self, snapshot: dict[int, tuple[list[int], int]]) -> None:
+        """Decode changed inbound patches and push them to Home Assistant lights."""
         for mapping in self.inbound:
             item = snapshot.get(mapping.universe)
             if item is None:
@@ -457,6 +473,7 @@ class SacnBridge:
                 await self._async_push_ha_light(mapping, command)
 
     async def _async_turn_off_entity(self, entity_id: str) -> None:
+        """Call `light.turn_off` when the entity still exists."""
         if not self.hass.states.get(entity_id):
             return
         await self.hass.services.async_call(
@@ -467,6 +484,7 @@ class SacnBridge:
         )
 
     async def _async_push_ha_light(self, mapping: InboundMap, command: ColorCommand) -> None:
+        """Apply a decoded colour command to an inbound-mapped light."""
         if not self.hass.states.get(mapping.entity_id):
             return
         if command.is_black:
@@ -525,10 +543,12 @@ class SacnBridge:
         }
 
     async def _async_stats(self) -> dict[str, Any]:
+        """Coordinator refresh callback that returns the current stats snapshot."""
         return self.stats()
 
 
 def _optional_ip(value: Any) -> str | None:
+    """Return a stripped IP string, or None when empty."""
     text = str(value or "").strip()
     return text or None
 
@@ -539,6 +559,7 @@ def _turn_on_payload(
     command: ColorCommand,
     transition: float,
 ) -> dict[str, Any]:
+    """Build a `light.turn_on` service payload for the entity's colour modes."""
     payload: dict[str, Any] = {
         ATTR_ENTITY_ID: entity_id,
         "transition": transition,
@@ -561,6 +582,7 @@ def _turn_on_payload(
 
 
 def _supported_modes(hass: HomeAssistant, entity_id: str) -> set[str]:
+    """Colour modes advertised by a light entity, or empty if unknown."""
     state = hass.states.get(entity_id)
     if state is None:
         return set()

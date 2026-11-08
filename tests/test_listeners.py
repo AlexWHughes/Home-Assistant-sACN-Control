@@ -243,11 +243,9 @@ def test_unsubscribed_during_dispatch_is_not_called() -> None:
     assert got == ["a"]
 
 
-sacn_lib = pytest.importorskip("sacn")
-
-
 def _real_receiver(monkeypatch: pytest.MonkeyPatch):
     """The wrapper around the real sacn library, on a socket that never opens."""
+    sacn_lib = pytest.importorskip("sacn")
     from sacn.receiving.receiver_socket_base import ReceiverSocketBase
 
     import sacn_control.receiver as receiver_module
@@ -273,11 +271,13 @@ def _real_receiver(monkeypatch: pytest.MonkeyPatch):
         bind_ip="127.0.0.1",
         on_dmx=lambda universe, dmx, cid: events.append(("dmx", universe, dmx[0])),
         on_lost=lambda universe: events.append(("lost", universe)),
+        on_terminated=lambda universe: events.append(("terminated", universe)),
     )
     return receiver, libs, events
 
 
 def _packet(seq: int, value: int, terminated: bool = False) -> bytes:
+    pytest.importorskip("sacn")
     from sacn.messages.data_packet import DataPacket
 
     return DataPacket(
@@ -297,9 +297,11 @@ def test_real_library_stream_resuming_with_the_same_data_is_delivered(
     handler.on_data(_packet(2, 10), 6.0)  # same look again
     assert events == [("dmx", 1, 10), ("lost", 1), ("dmx", 1, 10)]
     events.clear()
+    # Same DMX as the last frame: sacn would skip the universe listener without
+    # the termination hook, so only the availability timeout would fire.
     handler.on_data(_packet(3, 10, terminated=True), 7.0)
     handler.on_data(_packet(4, 10), 8.0)
-    assert events == [("lost", 1), ("dmx", 1, 10)]  # termination carries no data
+    assert events == [("lost", 1), ("terminated", 1), ("dmx", 1, 10)]
 
 
 def test_register_rejects_more_universes_than_the_join_cap() -> None:

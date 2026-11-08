@@ -115,10 +115,12 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def _async_reload_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Reload the config entry after options change."""
     await hass.config_entries.async_reload(entry.entry_id)
 
 
 def _bridge(hass: HomeAssistant) -> SacnBridge | None:
+    """Return the single loaded bridge, if any."""
     entries = hass.data.get(DOMAIN) or {}
     if not entries:
         return None
@@ -126,10 +128,12 @@ def _bridge(hass: HomeAssistant) -> SacnBridge | None:
 
 
 def _register_services(hass: HomeAssistant) -> None:
+    """Register mapping services once per Home Assistant process."""
     if hass.services.has_service(DOMAIN, "add_inbound"):
         return
 
     async def handle_add_inbound(call: ServiceCall) -> None:
+        """Add or replace an inbound light mapping from a service call."""
         bridge = _bridge(hass)
         if bridge is None:
             return
@@ -140,6 +144,7 @@ def _register_services(hass: HomeAssistant) -> None:
         _update_options(hass, bridge, inbound=inbound)
 
     async def handle_add_outbound(call: ServiceCall) -> None:
+        """Add or replace an outbound fixture mapping from a service call."""
         bridge = _bridge(hass)
         if bridge is None:
             return
@@ -150,6 +155,7 @@ def _register_services(hass: HomeAssistant) -> None:
         _update_options(hass, bridge, outbound=outbound)
 
     async def handle_remove_map(call: ServiceCall) -> None:
+        """Remove an inbound or outbound mapping by id token."""
         bridge = _bridge(hass)
         if bridge is None:
             return
@@ -220,6 +226,7 @@ def _update_options(
     inbound: list[InboundMap] | None = None,
     outbound: list[OutboundMap] | None = None,
 ) -> None:
+    """Persist mapping option changes onto the config entry."""
     current = dict(bridge.entry.options)
     if inbound is not None:
         current[CONF_INBOUND_MAPS] = [item.to_dict() for item in inbound]
