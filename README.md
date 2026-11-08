@@ -1,6 +1,6 @@
 # sACN Control
 
-A Home Assistant custom integration (HACS) that bridges **sACN / E1.31** both ways:
+A Home Assistant custom integration (Marketplace) that bridges **sACN / E1.31** both ways:
 
 - **sACN → Home Assistant** — a lighting console or media server drives existing `light.*` entities
 - **Home Assistant → sACN** — Home Assistant lights transmit DMX to sACN fixtures, nodes, and LED processors
@@ -9,15 +9,17 @@ This is the in-process sister of [sACN2HomeLX](https://github.com/AlexWHughes/sA
 
 Channel personalities match sACN2HomeLX whole-fixture modes (RGB / RGBW / HSBK, 8-bit and 16-bit). One outbound fixture can cover a strip or bar (up to 170 RGB pixels, clamped to the remaining channels on that universe). 2D matrix layouts stay in sACN2HomeLX.
 
-## Install with HACS
+## Install with Marketplace
 
-1. HACS → **⋯** → **Custom repositories**
-2. Add [`https://github.com/AlexWHughes/Home-Assistant-sACN-Control`](https://github.com/AlexWHughes/Home-Assistant-sACN-Control) as category **Integration**
-3. Search for **sACN Control** and install
-4. Restart Home Assistant
+Home Assistant 2026.11+ includes the Marketplace (formerly HACS) under **Settings → Marketplace**.
+
+1. **Settings → Marketplace** → **Add from link**
+2. Paste [`https://github.com/AlexWHughes/Home-Assistant-sACN-Control`](https://github.com/AlexWHughes/Home-Assistant-sACN-Control) (or `AlexWHughes/Home-Assistant-sACN-Control`) and select **Add**
+3. Open **sACN Control** and select **Install**
+4. Restart Home Assistant if prompted
 5. **Settings → Devices & services → Add integration → sACN Control**
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=AlexWHughes&repository=Home-Assistant-sACN-Control&category=integration)
+[![Open your Home Assistant instance and open a repository inside the Marketplace.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=AlexWHughes&repository=Home-Assistant-sACN-Control&category=integration)
 
 Manual install: copy `custom_components/sacn_control` into your Home Assistant `config/custom_components/` folder, restart, then add the integration from the UI.
 
