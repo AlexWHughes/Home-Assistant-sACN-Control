@@ -100,9 +100,10 @@ def test_receiver_reports_stream_timeout_only_while_running() -> None:
 
 
 class _Packet:
-    def __init__(self, terminated: bool) -> None:
+    def __init__(self, terminated: bool, cid: tuple[int, ...] | None = None) -> None:
         self.dmxData = (1, 2, 3)
         self.option_StreamTerminated = terminated
+        self.cid = cid
 
 
 def test_receiver_ignores_data_in_stream_termination_packets() -> None:
@@ -117,6 +118,23 @@ def test_receiver_ignores_data_in_stream_termination_packets() -> None:
     assert got == ["terminated 1"]
     receiver._handle_packet(1, _Packet(terminated=False))
     assert got == ["terminated 1", "dmx"]
+
+
+def test_receiver_ignores_self_cid_including_termination() -> None:
+    own = tuple(range(16))
+    got: list[str] = []
+    receiver = SacnReceiver(
+        bind_ip=None,
+        on_dmx=lambda universe, dmx, cid: got.append("dmx"),
+        ignore_cid=own,
+        on_terminated=lambda universe: got.append(f"terminated {universe}"),
+    )
+    receiver._running = True
+    receiver._handle_packet(1, _Packet(terminated=True, cid=own))
+    receiver._handle_packet(1, _Packet(terminated=False, cid=own))
+    assert got == []
+    receiver._handle_packet(1, _Packet(terminated=True, cid=tuple(range(16, 32))))
+    assert got == ["terminated 1"]
 
 
 class _FakeSacnLib:

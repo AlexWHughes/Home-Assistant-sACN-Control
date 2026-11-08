@@ -345,6 +345,9 @@ class SacnReceiver:
         """Deliver DMX, or termination, from one accepted universe packet."""
         if not self._running:
             return
+        cid = _packet_cid(packet)
+        if self._ignore_cid is not None and cid == self._ignore_cid:
+            return
         if getattr(packet, "option_StreamTerminated", False):
             # E1.31 6.2.6: property values in a terminating packet are ignored.
             # The sacn library reports the stream lost and then still delivers
@@ -359,9 +362,6 @@ class SacnReceiver:
                         "Error delivering sACN stream termination for universe %s",
                         universe,
                     )
-            return
-        cid = _packet_cid(packet)
-        if self._ignore_cid is not None and cid == self._ignore_cid:
             return
         dmx = _extract_dmx(packet)
         if dmx is None:
