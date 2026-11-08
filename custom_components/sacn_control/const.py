@@ -6,6 +6,8 @@ from enum import StrEnum
 from typing import Final
 
 DOMAIN: Final = "sacn_control"
+# hass.data key of the DmxListenerRegistry other integrations subscribe through.
+DATA_LISTENERS: Final = f"{DOMAIN}_listeners"
 MANUFACTURER: Final = "sACN Control"
 DEFAULT_NAME: Final = "sACN Control"
 
@@ -45,6 +47,13 @@ KELVIN_MAX: Final = 9000
 
 UNIVERSE_MIN: Final = 1
 UNIVERSE_MAX: Final = 63999
+# One listener subscription joins a multicast group. Linux allows 20 groups
+# per socket unless igmp_max_memberships is raised. Inbound mappings are
+# joined first, and this caps the extra groups a caller can add.
+MAX_LISTENER_UNIVERSES: Final = 64
+# Latest-frame cap for raw listeners. A 40 Hz sender still gets every frame.
+# A flooded universe cannot queue one Home Assistant callback per packet.
+LISTENER_MAX_HZ: Final = 40
 CHANNEL_MIN: Final = 1
 CHANNEL_MAX: Final = 512
 DMX_CHANNELS: Final = 512
